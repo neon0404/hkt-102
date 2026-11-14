@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1794550104227,
+      "tag": "0000_plain_bastion",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794550627885,
+      "tag": "0001_flat_victor_mancha",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794594881973,
+      "tag": "0002_post_card",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794603619850,
+      "tag": "0003_analytics_video",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794649710002,
+      "tag": "0004_rich_posts_mcp",
+      "breakpoints": true
+    }
+  ]
+}

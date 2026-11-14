@@ -1,0 +1,29 @@
+[project]
+name = "speech-server"
+version = "0.1.0"
+description = "Распознавание и синтез речи для AI-маркетолога на видеокарте оператора"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "torch>=2.7",
+  "torchaudio>=2.7",
+  "transformers>=4.46",
+  "accelerate>=1.0",
+  "omegaconf>=2.3",
+  "numpy>=1.26",
+  "scipy>=1.13",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+

@@ -1,0 +1,61 @@
+# Зависимости и сборка
+node_modules/
+.nuxt/
+.output/
+.nitro/
+.cache/
+dist/
+
+# Окружение и секреты (шаблон .env.example остаётся в репозитории)
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+# Публичный корневой сертификат Минцифры для SaluteSpeech — нужен в репозитории
+!core/certs/russian_trusted_root_ca.pem
+
+# Данные: локальная БД, медиа, модели
+.data/
+data/
+.models/
+.piper/
+
+# Фирменные материалы: архив (~127 МБ), брендбук PDF (~25 МБ) и прочие исходники не храним.
+# Оставлены только файлы, которые читает scripts/seed.ts: два логотипа и два шрифта.
+materials/brand/**
+!materials/brand/**/
+!materials/brand/elements/*/ЛОГОТИП/БЕЛЫЙ/RUS/.PNG/ЛОГОТИП.png
+!materials/brand/elements/*/ЛОГОТИП/ОСНОВНОЙ ЦВЕТ/RUS/.PNG/Логотип.png
+!materials/brand/elements/*/ШРИФТЫ/ОСНОВНЫЕ/AVENIR NEXT CYR/avenirnextcyr-medium.ttf
+!materials/brand/elements/*/ШРИФТЫ/ОСНОВНЫЕ/AVENIR NEXT CYR/avenirnextcyr-bold.ttf
+
+# Речевой сервис: окружение, кэши и модели
+speech-server/.venv/
+speech-server/.cache/
+speech-server/__pycache__/
+
+# Логи и временные файлы
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+__pycache__/
+*.pyc
+*.tsbuildinfo
+
+# Локальные настройки редактора и ассистента
+.claude/
+.vscode/
+.idea/
+
+# Документы
+docs/
+materials/TZ.pdf

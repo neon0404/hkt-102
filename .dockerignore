@@ -1,0 +1,11 @@
+node_modules
+.nuxt
+.output
+.git
+.env
+data
+materials
+docs/PRD.md
+*.log
+.claude
+speech-server

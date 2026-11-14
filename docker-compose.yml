@@ -1,0 +1,65 @@
+x-app: &app
+  build: .
+  image: ${APP_IMAGE:-ai-marketer:latest}
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-marketer}
+    MEDIA_DIR: /data/media
+    CODEX_HOME: /codex
+  volumes:
+    - media:/data/media
+    - codex_auth:/codex
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-marketer}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-marketer}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["pnpm", "db:migrate"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  app:
+    <<: *app
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  worker:
+    <<: *app
+    command: ["pnpm", "worker"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${CADDY_HTTP_BIND:-80}:80"
+      - "${CADDY_HTTPS_BIND:-443}:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [app]
+
+volumes:
+  pgdata:
+  media:
+  codex_auth:
+  caddy_data:
