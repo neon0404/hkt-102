@@ -19,13 +19,29 @@ export const SECTIONS: Section[] = [
   { value: 'members', label: 'Участники', icon: 'i-lucide-users', group: 'setup', step: 'members' },
   { value: 'automation', label: 'Автоматизация', icon: 'i-lucide-calendar-clock', group: 'setup', step: 'schedule' },
   { value: 'ai', label: 'Модель', icon: 'i-lucide-bot', group: 'system' },
-  { value: 'agents', label: 'Агенты (MCP)', icon: 'i-lucide-plug-zap', group: 'system' },
+  { value: 'agents', label: 'Агенты', icon: 'i-lucide-plug-zap', group: 'system' },
   { value: 'log', label: 'Журнал и расход', icon: 'i-lucide-scroll-text', group: 'system' },
 ]
 
 export const SETUP_STEPS = SECTIONS.filter(s => s.step)
 
 export const sectionPath = (tenantId: string, value: string) => value ? `/t/${tenantId}/${value}` : `/t/${tenantId}`
+
+export const TIMEZONES = [
+  { value: 'Europe/Kaliningrad', label: 'Калининград, UTC+2' },
+  { value: 'Europe/Moscow', label: 'Москва, UTC+3' },
+  { value: 'Europe/Samara', label: 'Самара, UTC+4' },
+  { value: 'Asia/Yekaterinburg', label: 'Екатеринбург, Уфа, UTC+5' },
+  { value: 'Asia/Omsk', label: 'Омск, UTC+6' },
+  { value: 'Asia/Novosibirsk', label: 'Новосибирск, UTC+7' },
+  { value: 'Asia/Krasnoyarsk', label: 'Красноярск, UTC+7' },
+  { value: 'Asia/Irkutsk', label: 'Иркутск, UTC+8' },
+  { value: 'Asia/Yakutsk', label: 'Якутск, UTC+9' },
+  { value: 'Asia/Vladivostok', label: 'Владивосток, UTC+10' },
+  { value: 'Asia/Magadan', label: 'Магадан, UTC+11' },
+  { value: 'Asia/Kamchatka', label: 'Камчатка, UTC+12' },
+]
+export const tzLabel = (tz?: string | null) => TIMEZONES.find(t => t.value === tz)?.label ?? tz ?? ''
 
 export const tenantColor = (t: any) => t?.settings?.brand?.primary || '#196C7F'
 

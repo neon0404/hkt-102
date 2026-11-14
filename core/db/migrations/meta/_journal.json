@@ -36,6 +36,13 @@
       "when": 1794649710002,
       "tag": "0004_rich_posts_mcp",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794682529072,
+      "tag": "0005_admin_users_tg",
+      "breakpoints": true
     }
   ]
 }

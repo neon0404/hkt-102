@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import { InlineKeyboard } from 'grammy'
 import type { MessageEntity } from 'grammy/types'
 import type { AiRun, CallMeta } from '../ai/ops'
@@ -6,7 +6,7 @@ import type { CardOut } from '../ai/schemas'
 import { hasUrl, trackLinks, trackLinksMarkdown } from '../analytics'
 import { humanWarnings } from '../ai/humanize'
 import { audit } from '../audit'
-import { decryptSecret } from '../crypto'
+import { decryptSecret, isUuid } from '../crypto'
 import { db, schema } from '../db/client'
 import type { PostFact, PostFormat, PostGallery, PostStatus, PostVideo } from '../db/schema'
 import { cardFor, drawCard, type DrawnCard, photoQuery, switchTemplate } from '../image/card'
@@ -86,7 +86,19 @@ export async function notifyOperator(tenantId: string | null, text: string) {
     if (t?.settings.alert_chat_id) chat = t.settings.alert_chat_id
   }
   await audit(tenantId, 'system', null, 'operator.alert', null, null, { text })
-  if (chat) await sendText(chat, `🛠 <b>Оператору</b>\n${esc(text)}`)
+  const html = `🛠 <b>Оператору</b>\n${esc(text)}`
+  const sent = new Set<string>()
+  if (chat) {
+    sent.add(String(chat))
+    await sendText(chat, html).catch(() => null)
+  }
+  const operators = await db.select({ tgUserId: schema.adminUsers.tgUserId }).from(schema.adminUsers)
+    .where(isNotNull(schema.adminUsers.tgUserId)).catch(() => [])
+  for (const { tgUserId } of operators) {
+    if (!tgUserId || sent.has(String(tgUserId))) continue
+    sent.add(String(tgUserId))
+    await sendText(tgUserId, html).catch(() => null)
+  }
 }
 
 export async function sayToMember(member: Pick<Member, 'id' | 'tenantId' | 'tgChatId'>, html: string, opts: { postId?: string | null, extra?: Record<string, unknown> } = {}) {
@@ -165,7 +177,7 @@ export async function updatePostCard(tenantId: string, postId: string, patch: Ca
   const tenant = await getTenant(tenantId)
   const post = await getPost(tenantId, postId)
   if (!post?.currentVersionId) throw new PostStateError('Пост не найден')
-  if (post.kind !== 'post') throw new PostStateError('У сценария видео нет карточки')
+  if (post.kind !== 'post') throw new PostStateError('У ролика нет карточки')
   if (!['draft', 'in_review', 'approved', 'scheduled'].includes(post.status)) throw new PostStateError('Пост уже опубликован, публикуется или отклонён — изменить его нельзя')
   const version = (await getVersion(tenantId, post.currentVersionId))!
   const card = versionCard(version, post.rubric)
@@ -188,7 +200,7 @@ export async function updatePostCard(tenantId: string, postId: string, patch: Ca
       generate: patch.photo?.action === 'ai',
       upload: patch.photo?.action === 'upload' ? patch.photo : null,
       query: photoQuery({ title: fields.title || version.title, image_prompt: version.imagePrompt }),
-      prompt: version.imagePrompt || `${version.title}, glass, architecture, photorealistic`,
+      prompt: version.imagePrompt || `${version.title}, photorealistic`,
     })
     if (patch.photo?.action === 'ai' && drawn.card.photo?.media_id === card.photo?.media_id) throw new PostStateError('Не получилось сгенерировать картинку. Попробуйте ещё раз через минуту')
   }
@@ -239,8 +251,8 @@ export async function updatePostLayout(tenantId: string, postId: string, patch: 
       if (ids().length >= GALLERY_MAX) throw new PostStateError(`В карусели не больше ${GALLERY_MAX + 1} фото`)
       let id: string | undefined
       if (g.action === 'generate') {
-        const angles = ['close-up detail shot', 'wide view in a real interior or facade', 'production or installation scene', 'macro texture and light reflections']
-        const base = g.prompt?.trim() || version.imagePrompt || `${version.title}, glass, architecture`
+        const angles = ['close-up detail shot', 'wide view in a real setting', 'product in use', 'macro texture and light']
+        const base = g.prompt?.trim() || version.imagePrompt || `${version.title}, photorealistic`
         const tenant = await getTenant(tenantId)
         const pick = await findPhoto(tenant, { query: version.title, prompt: `${base}. Variation: ${angles[ids().length % angles.length]}`, run: { tenantId, calls: 0 }, generate: true })
         if (!pick) throw new PostStateError('Не получилось сгенерировать фото. Попробуйте ещё раз через минуту')
@@ -406,7 +418,7 @@ async function channelLabel(post: Post): Promise<string> {
   const all = await db.select().from(schema.integrations)
     .where(and(eq(schema.integrations.tenantId, post.tenantId), eq(schema.integrations.status, 'active')))
   const main = all.find(i => i.id === post.integrationId)
-  if (!main) return 'Telegram — канал не подключён'
+  if (!main) return 'канал не подключён'
   const extra = main.platform === 'telegram' ? all.filter(i => i.platform === 'vk') : []
   return [main, ...extra].map(label).join(' + ')
 }
@@ -422,7 +434,7 @@ function cardFooterLines(post: Post, version: Version, tenant: Tenant, channel: 
   else if (photos > 1) lines.push(`🖼 Карусель из ${photos} фото`)
   if (sources.length) lines.push(`📚 Факты из источников: ${sources.slice(0, 3).map(s => `«${String(s).slice(0, 50)}»`).join(', ')}`)
   for (const w of version.warnings.slice(0, 4)) lines.push(`⚠️ ${w}`)
-  lines.push('🎙 Можно ответить голосом: «одобряю», «отклоняю» или что поправить.')
+  lines.push('🎙 Можно ответить текстом или голосом: «одобряю», «отклоняю» или что поправить.')
   return lines
 }
 
@@ -461,7 +473,7 @@ export async function sendForApproval(tenantId: string, postId: string): Promise
   if (!approvers.length) {
     await notifyOperator(tenantId, `У компании «${tenant.name}» нет согласующих: пост «${version.title}» остаётся черновиком.`)
     for (const m of await activeMembers(tenantId)) {
-      await sayToMember(m, 'Материал готов, но у компании не назначен согласующий. Обратитесь к оператору сервиса.', { postId })
+      await sayToMember(m, 'Пост готов, но в компании нет согласующего. Попросите оператора назначить его.', { postId }).catch(() => null)
     }
     return { sent: 0 }
   }
@@ -469,7 +481,7 @@ export async function sendForApproval(tenantId: string, postId: string): Promise
     .where(and(eq(schema.posts.tenantId, tenantId), eq(schema.posts.id, postId), inArray(schema.posts.status, ['draft', 'in_review'])))
 
   const channel = await channelLabel(post)
-  const head = `<b>На согласование</b> · версия ${version.n}${post.origin === 'schedule' ? ' · подготовлено автономно' : ''}${post.kind === 'video_script' ? ' · сценарий видео' : ''}`
+  const head = `<b>На согласование</b> · версия ${version.n}${post.origin === 'schedule' ? ' · по расписанию' : ''}${post.kind === 'video_script' ? ' · сценарий видео' : ''}`
   const footer = cardFooter(post, version, tenant, channel)
   const body = version.video?.status === 'ready' ? esc(postBody(version)) : [mdToHtml(version.text), esc(version.hashtags.join(' '))].filter(Boolean).join('\n\n')
   const caption = `${head}\n\n${body}\n\n${footer}`
@@ -478,7 +490,7 @@ export async function sendForApproval(tenantId: string, postId: string): Promise
   const slides = post.kind === 'post' && !video ? slidesOf(version) : []
   let useRich = version.format === 'rich' && post.kind === 'post' && !video
   const richCard = [
-    `### 📝 На согласование · версия ${version.n}${post.origin === 'schedule' ? ' · подготовлено автономно' : ''}`,
+    `### 📝 На согласование · версия ${version.n}${post.origin === 'schedule' ? ' · по расписанию' : ''}`,
     richMarkdown(version.text, version.hashtags, slides, version.gallery?.mode),
     '---',
     cardFooterLines(post, version, tenant, channel).map(l => `> ${mdEsc(l)}`).join('\n>\n'),
@@ -557,7 +569,7 @@ export async function sendForApproval(tenantId: string, postId: string): Promise
 export async function resendForApproval(tenantId: string, postId: string, actor: { type: 'operator' | 'member', id: string | null }) {
   const post = await getPost(tenantId, postId)
   if (!post) throw new PostStateError('Пост не найден')
-  if (!['draft', 'in_review'].includes(post.status)) throw new PostStateError('Пост уже одобрен или вышел — новая версия уйдёт на согласование сама')
+  if (!['draft', 'in_review'].includes(post.status)) throw new PostStateError('Пост уже одобрен или опубликован — отправлять на согласование не нужно')
   const stale = await db.update(schema.approvals).set({ decision: 'superseded', decidedAt: new Date() })
     .where(and(eq(schema.approvals.tenantId, tenantId), eq(schema.approvals.postId, postId), eq(schema.approvals.decision, 'pending'))).returning()
   for (const a of stale) await closeCard(a, '↻ Обновлено — смотрите новую карточку')
@@ -577,7 +589,7 @@ export type DecisionResult =
   | { ok: true, action: 'approved' | 'rejected' | 'awaiting_comment' | 'approved_partial', postId: string }
 
 export async function decideApproval(approvalId: string, tgUserId: number, action: 'a' | 'c' | 'r', comment?: string | null): Promise<DecisionResult> {
-  if (!/^[0-9a-f-]{36}$/i.test(approvalId)) return { ok: false, reason: 'Некорректная кнопка' }
+  if (!isUuid(approvalId)) return { ok: false, reason: 'Некорректная кнопка' }
   const [approval] = await db.select().from(schema.approvals).where(eq(schema.approvals.id, approvalId))
   if (!approval) return { ok: false, reason: 'Согласование не найдено' }
   const [member] = await db.select().from(schema.tenantMembers).where(eq(schema.tenantMembers.id, approval.memberId))
@@ -757,11 +769,14 @@ export async function publishPost(tenantId: string, postId: string): Promise<{ s
     await db.update(schema.posts).set({ status: 'failed' }).where(eq(schema.posts.id, postId))
     if (publicationId) await db.update(schema.publications).set({ status, error }).where(eq(schema.publications.id, publicationId))
     await audit(tenantId, 'system', null, `publication.${status}`, 'post', postId, { error })
-    const text = status === 'uncertain'
-      ? `Публикация «${version.title}»: связь оборвалась, исход неизвестен. Автоповтора нет, чтобы не было дубля — проверьте канал и решите в админке.`
-      : `Публикация «${version.title}» не удалась: ${error}`
-    for (const m of await postAudience(post)) await sayToMember(m, `⚠️ ${esc(text)}`, { postId })
-    await notifyOperator(tenantId, `[${tenant.name}] ${text}`)
+    const forMembers = status === 'uncertain'
+      ? `Не знаю, вышел ли пост «${version.title}»: связь с площадкой оборвалась. Повторять не буду, чтобы не было дубля, — оператор проверит канал.`
+      : `Пост «${version.title}» не удалось опубликовать. Оператор уже знает и разберётся.`
+    const forOperator = status === 'uncertain'
+      ? `Пост «${version.title}»: связь оборвалась (${error}), исход публикации неизвестен. Автоповтора нет — проверьте канал и отметьте результат в админке.`
+      : `Пост «${version.title}» не опубликован: ${error}`
+    for (const m of await postAudience(post)) await sayToMember(m, `⚠️ ${esc(forMembers)}`, { postId }).catch(() => null)
+    await notifyOperator(tenantId, `[${tenant.name}] ${forOperator}`)
     return { status }
   }
 
@@ -772,9 +787,9 @@ export async function publishPost(tenantId: string, postId: string): Promise<{ s
     await db.update(schema.posts).set({ status: 'published' }).where(eq(schema.posts.id, postId))
     await audit(tenantId, 'system', null, 'publication.published', 'post', postId, { url, version: version.n })
     const extra = integration!.platform === 'telegram' ? await activeIntegration(tenantId, 'vk') : null
-    const vkUrl = extra ? await crosspost(tenantId, post, version, extra) : null
-    for (const m of await postAudience(post)) {
-      await sayToMember(m, `✅ Опубликовано: «${esc(version.title)}»\n${url}${vkUrl ? `\nВКонтакте: ${vkUrl}` : ''}`, { postId })
+    const vkUrl = extra ? await crosspost(tenantId, post, version, extra).catch((e) => { console.warn('[publish] кросспост во ВКонтакте не удался', (e as Error).message); return null }) : null
+    for (const m of await postAudience(post).catch(() => [])) {
+      await sayToMember(m, `✅ Опубликовано: «${esc(version.title)}»\n${url}${vkUrl ? `\nВКонтакте: ${vkUrl}` : ''}`, { postId }).catch(() => null)
     }
     return { status: 'published', url }
   }

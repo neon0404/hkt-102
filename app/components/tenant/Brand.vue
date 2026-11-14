@@ -20,7 +20,10 @@ async function load(resetForm = true) {
     state.value = res
     error.value = ''
     if (res.current && (resetForm || changed) && !dirty.value) {
-      form.value = JSON.parse(JSON.stringify({ strategy: '', ...res.current.data }))
+      form.value = JSON.parse(JSON.stringify({
+        description: '', tone: '', strategy: '', products: [], audiences: [], advantages: [], rubrics: [], forbidden: [], required_phrases: [], facts: [],
+        ...res.current.data,
+      }))
     }
   }
   catch (e: any) { error.value = e.message }
@@ -34,23 +37,39 @@ const jobFailed = computed(() => state.value?.last_job?.status === 'failed' ? st
 watch(form, () => { dirty.value = true }, { deep: true })
 watch(() => state.value?.current?.version, () => nextTick(() => { dirty.value = false }))
 
-async function generate() {
+const ask = useConfirm()
+
+async function runGenerate() {
   busy.value = 'generate'
   try {
     await api(`/tenants/${props.tenantId}/brand-profile/generate`, { method: 'POST' })
-    toast.add({ title: 'Формирую профиль', color: 'info' })
+    toast.add({ title: 'Профиль формируется', color: 'info' })
     dirty.value = false
     await load(false)
   }
   catch {}
   finally { busy.value = '' }
 }
+async function generate() {
+  if (busy.value || generating.value) return
+  if (!state.value?.current) return runGenerate()
+  const ok = await ask({
+    title: 'Сформировать профиль заново?',
+    description: dirty.value ? 'Несохранённые правки пропадут' : 'Появится новая версия черновика',
+    confirmLabel: 'Сформировать',
+    confirmIcon: 'i-lucide-sparkles',
+    color: 'primary',
+  })
+  if (ok) await runGenerate()
+}
 
 async function save(confirm = false) {
+  if (busy.value) return
   busy.value = confirm ? 'confirm' : 'save'
   try {
     if (dirty.value || !confirm) {
-      await api(`/tenants/${props.tenantId}/brand-profile`, { method: 'PUT', body: form.value })
+      const body = { ...form.value, facts: (form.value.facts ?? []).filter((f: any) => f.claim?.trim()) }
+      await api(`/tenants/${props.tenantId}/brand-profile`, { method: 'PUT', body })
       dirty.value = false
     }
     if (confirm) {
@@ -66,6 +85,8 @@ async function save(confirm = false) {
   finally { busy.value = '' }
 }
 
+const factSource = (f: any) => (f.chunk_id && state.value?.fact_sources?.[f.chunk_id]) || null
+
 const LISTS = [
   { key: 'products', label: 'Продукты и услуги' }, { key: 'audiences', label: 'Аудитории' }, { key: 'advantages', label: 'Преимущества' },
   { key: 'rubrics', label: 'Рубрики' }, { key: 'forbidden', label: 'Запреты' }, { key: 'required_phrases', label: 'Обязательные формулировки' },
@@ -74,8 +95,8 @@ const statusBadge = computed(() => {
   if (!state.value?.current) return null
   if (dirty.value) return { label: 'Не сохранено', color: 'warning' }
   return state.value.current.status === 'confirmed'
-    ? { label: `Подтверждён · v${state.value.current.version}`, color: 'success' }
-    : { label: `Черновик · v${state.value.current.version}`, color: 'warning' }
+    ? { label: `Подтверждён · версия ${state.value.current.version}`, color: 'success' }
+    : { label: `Черновик · версия ${state.value.current.version}`, color: 'warning' }
 })
 </script>
 
@@ -85,7 +106,7 @@ const statusBadge = computed(() => {
       v-if="!state?.current"
       variant="outline"
       :icon="generating ? 'i-lucide-loader-circle' : 'i-lucide-sparkles'"
-      :title="generating ? 'Изучаю материалы компании…' : 'Профиля ещё нет'"
+      :title="generating ? 'Профиль формируется…' : 'Профиля нет'"
       :description="!tenant.setup.sources ? 'Сначала добавьте источники' : undefined"
       :ui="{ avatar: generating ? 'animate-spin' : '' }"
       class="py-14"
@@ -101,9 +122,9 @@ const statusBadge = computed(() => {
       <Teleport defer to="#panel-actions">
         <UBadge v-if="statusBadge" :color="statusBadge.color" variant="subtle" class="hidden sm:inline-flex">{{ statusBadge.label }}</UBadge>
         <UTooltip text="Сформировать заново">
-          <UButton color="neutral" variant="ghost" icon="i-lucide-refresh-cw" aria-label="Сформировать заново" :loading="generating || busy === 'generate'" @click="generate" />
+          <UButton color="neutral" variant="ghost" icon="i-lucide-refresh-cw" aria-label="Сформировать заново" :loading="generating || busy === 'generate'" :disabled="!!busy" @click="generate" />
         </UTooltip>
-        <UButton color="neutral" variant="outline" :loading="busy === 'save'" :disabled="!dirty" @click="save(false)">Сохранить</UButton>
+        <UButton color="neutral" variant="outline" :loading="busy === 'save'" :disabled="!dirty || (!!busy && busy !== 'save')" @click="save(false)">Сохранить</UButton>
         <UButton icon="i-lucide-check" :loading="busy === 'confirm'" :disabled="state.current.status === 'confirmed' && !dirty" @click="save(true)">Подтвердить</UButton>
       </Teleport>
 
@@ -134,15 +155,15 @@ const statusBadge = computed(() => {
         </template>
         <ul class="divide-y divide-default">
           <li v-for="(f, i) in form.facts" :key="i" class="group flex items-start gap-3 px-4 py-2.5">
-            <UIcon :name="f.chunk_id && state.fact_sources[f.chunk_id] ? 'i-lucide-book-open-check' : 'i-lucide-pencil-line'" class="mt-2.5 size-4 shrink-0" :class="f.chunk_id && state.fact_sources[f.chunk_id] ? 'text-success' : 'text-warning'" />
+            <UIcon :name="factSource(f) ? 'i-lucide-book-open-check' : 'i-lucide-pencil-line'" class="mt-2.5 size-4 shrink-0" :class="factSource(f) ? 'text-success' : 'text-warning'" />
             <div class="min-w-0 flex-1">
-              <UInput v-model="f.claim" class="w-full" variant="ghost" :ui="{ base: 'px-0 text-highlighted' }" />
-              <p v-if="f.chunk_id && state.fact_sources[f.chunk_id]" class="truncate text-xs text-muted" :title="state.fact_sources[f.chunk_id].excerpt">
-                {{ state.fact_sources[f.chunk_id].title }}
+              <UInput v-model="f.claim" class="w-full" variant="ghost" placeholder="Новый факт" aria-label="Факт" :ui="{ base: 'px-0 text-highlighted' }" />
+              <p v-if="factSource(f)" class="truncate text-xs text-muted" :title="factSource(f).excerpt">
+                {{ factSource(f).title }}
               </p>
               <p v-else class="text-xs text-warning">Без источника</p>
             </div>
-            <UButton size="sm" color="neutral" variant="ghost" icon="i-lucide-x" aria-label="Убрать факт" class="opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100" @click="form.facts.splice(i, 1)" />
+            <UButton size="sm" color="neutral" variant="ghost" icon="i-lucide-x" aria-label="Убрать факт" class="transition lg:opacity-0 lg:group-hover:opacity-100 lg:focus-visible:opacity-100" @click="form.facts.splice(i, 1)" />
           </li>
         </ul>
       </UCard>

@@ -22,7 +22,8 @@ const hasTgBack = ref(false)
 const scroller = ref<HTMLElement | null>(null)
 
 const tg = () => (window as any).Telegram?.WebApp
-const haptic = (kind: 'success' | 'warning' | 'error' = 'success') => tg()?.HapticFeedback?.notificationOccurred(kind)
+const tgAtLeast = (v: string) => !!tg()?.isVersionAtLeast?.(v)
+const haptic = (kind: 'success' | 'warning' | 'error' = 'success') => { if (tgAtLeast('6.1')) tg()?.HapticFeedback?.notificationOccurred(kind) }
 
 async function call<T = any>(path: string, opts: { method?: string, body?: any } = {}): Promise<T> {
   try {
@@ -34,9 +35,11 @@ async function call<T = any>(path: string, opts: { method?: string, body?: any }
 }
 const img = (url: string | null, v?: string | number) => url ? `${url}?tg=${encodeURIComponent(initData.value)}${v ? `&v=${v}` : ''}` : ''
 const tz = computed(() => me.value?.tenant.timezone ?? 'Europe/Moscow')
-const fmt = (v: string | null) => v ? new Intl.DateTimeFormat('ru-RU', { weekday: 'short', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: tz.value }).format(new Date(v)).replace(/^./, c => c.toUpperCase()) : 'После одобрения'
+const fmt = (v: string | null) => v ? new Intl.DateTimeFormat('ru-RU', { weekday: 'short', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: tz.value }).format(new Date(v)).replace(/^./, c => c.toUpperCase()) : ''
+const whenOut = (v: string | null) => fmt(v) || 'Сразу после одобрения'
 const ymd = (d: Date | string) => new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: tz.value }).format(new Date(d))
 const today = computed(() => ymd(new Date()))
+const PLATFORM: Record<string, string> = { telegram: 'Telegram', vk: 'ВКонтакте', max: 'MAX' }
 
 const NAV = [
   { value: 'home', icon: 'i-lucide-house', label: 'Главная' },
@@ -65,19 +68,35 @@ function openChannel(url: string) {
   else window.open(url, '_blank')
 }
 
+const canRetry = ref(false)
 async function load() {
   try {
     me.value = await call('/me')
     await Promise.all([loadPosts(), loadPlan()])
   }
-  catch (e: any) { error.value = e.message }
+  catch (e: any) { error.value = e.message; canRetry.value = true }
+}
+function retry() {
+  error.value = ''
+  canRetry.value = false
+  me.value = null
+  load().then(() => { if (me.value && tab.value !== 'home') loadTab() })
 }
 const loadPosts = async () => { posts.value = await call<any[]>('/posts') }
 const loadPlan = async () => { plan.value = await call<any[]>('/plan') }
+const loadMessages = async () => {
+  const m = await call<any[]>('/messages')
+  if (m.at(-1)?.id !== messages.value?.at(-1)?.id || m.length !== messages.value?.length) { messages.value = m; scrollChat() }
+}
+let messagesLoad: Promise<void> | null = null
 async function loadTab() {
   try {
-    if (tab.value === 'results') summary.value = await call(`/summary?days=${period.value}`)
-    else if (tab.value === 'task') { messages.value = await call<any[]>('/messages'); scrollChat() }
+    if (tab.value === 'results') {
+      const p = period.value
+      const s = await call(`/summary?days=${p}`)
+      if (p === period.value) summary.value = s
+    }
+    else if (tab.value === 'task') { messagesLoad = loadMessages(); await messagesLoad }
     else if (tab.value === 'plan') await loadPlan()
     else await loadPosts()
   }
@@ -89,9 +108,9 @@ let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   timer = setInterval(() => {
     if (!me.value || document.hidden) return
-    if (tab.value === 'task' && waitingReply.value) call<any[]>('/messages').then((m) => { if (m.length !== messages.value?.length) { messages.value = m; scrollChat() } }).catch(() => {})
+    if (tab.value === 'task' && waitingReply.value) loadMessages().catch(() => {})
     if (!detail.value && (tab.value === 'home' || tab.value === 'materials') && posts.value?.some(p => p.status === 'draft' || p.status === 'publishing')) loadPosts().catch(() => {})
-    if (detail.value && (detail.value.status === 'draft' || detail.value.revising)) refreshDetail().catch(() => {})
+    if (detail.value && (detail.value.status === 'draft' || detail.value.status === 'publishing' || detail.value.revising)) refreshDetail().catch(() => {})
   }, 4000)
 })
 const tick = setInterval(() => { if (waitingReply.value) nowTick.value = Date.now() }, 1000)
@@ -128,11 +147,12 @@ const thisWeek = computed(() => weekDays(monday()))
 
 const filter = ref('all')
 const FILTERS = [
-  { label: 'Все', value: 'all' }, { label: 'Готовятся', value: 'draft' }, { label: 'На решении', value: 'in_review' },
-  { label: 'Одобрены', value: 'approved' }, { label: 'Вышли', value: 'published' }, { label: 'Ошибки', value: 'failed' }, { label: 'Отклонены', value: 'rejected' },
+  { label: 'Все', value: 'all' }, { label: 'Готовятся', value: 'draft' }, { label: 'На согласовании', value: 'in_review' },
+  { label: 'Одобрены', value: 'approved' }, { label: 'Опубликованы', value: 'published' }, { label: 'Ошибки', value: 'failed' }, { label: 'Отклонены', value: 'rejected' },
 ]
 const inFilter = (v: string, p: any) => v === 'all' || p.status === v || (v === 'approved' && ['scheduled', 'publishing'].includes(p.status))
 const count = (v: string) => posts.value?.filter(p => inFilter(v, p)).length ?? 0
+watch(posts, () => { if (filter.value !== 'all' && posts.value && !count(filter.value)) filter.value = 'all' })
 const groups = computed(() => {
   const list = posts.value?.filter(p => inFilter(filter.value, p)) ?? []
   return [
@@ -146,39 +166,41 @@ const chatEnd = ref<HTMLElement | null>(null)
 const QUICK = [
   { label: 'Пост о новинке', text: 'Подготовь пост о новинке компании' },
   { label: 'План на неделю', text: 'Составь контент-план на неделю' },
-  { label: 'Короткое видео', text: 'Сделай короткий ролик о производстве стекла' },
-  { label: 'Отчёт', text: 'Покажи отчёт за неделю' },
-  { label: 'Статус', text: 'Что с последними материалами?' },
+  { label: 'Сценарий видео', text: 'Подготовь сценарий короткого видео о компании' },
+  { label: 'Отчёт за неделю', text: 'Покажи отчёт за неделю' },
+  { label: 'Что с постами', text: 'Что с последними постами?' },
 ]
 const nowTick = ref(Date.now())
-const waitingSince = computed(() => {
+const waitingReply = computed(() => {
   const last = messages.value?.at(-1)
-  if (!last || last.direction !== 'in') return null
-  const t = new Date(last.created_at).getTime()
-  return nowTick.value - t < 5 * 60_000 ? t : null
+  return !!last && last.direction === 'in' && nowTick.value - new Date(last.created_at).getTime() < 5 * 60_000
 })
-const waitingReply = computed(() => waitingSince.value !== null)
-const waitingPhase = computed(() => {
-  const s = waitingSince.value === null ? 0 : (nowTick.value - waitingSince.value) / 1000
-  return s < 6 ? 'Читаю задачу' : s < 20 ? 'Подбираю факты из материалов' : s < 45 ? 'Пишу текст' : s < 90 ? 'Готовлю картинку' : 'Почти готово'
-})
+const sending = ref(false)
 async function askBot(text: string) {
   goTab('task')
+  await nextTick()
+  await messagesLoad?.catch(() => {})
   if (messages.value === null) messages.value = await call<any[]>('/messages').catch(() => [])
   await sendTask(text)
 }
 function scrollChat() { nextTick(() => chatEnd.value?.scrollIntoView({ behavior: 'smooth', block: 'end' })) }
 async function sendTask(text?: string) {
   const t = (text ?? draft.value).trim()
-  if (t.length < 2) return
-  draft.value = ''
+  if (t.length < 2 || sending.value) return
+  sending.value = true
+  if (text === undefined) draft.value = ''
   try {
     const m = await call('/messages', { method: 'POST', body: { text: t } })
-    messages.value = [...(messages.value ?? []), m]
+    nowTick.value = Date.now()
+    messages.value = [...(messages.value ?? []).filter(x => x.id !== m.id), m]
     scrollChat()
     haptic()
   }
-  catch (e: any) { draft.value = t; toast.add({ title: e.message, color: 'error' }) }
+  catch (e: any) {
+    if (text === undefined) draft.value = t
+    toast.add({ title: e.message, color: 'error' })
+  }
+  finally { sending.value = false }
 }
 
 const recording = ref(false)
@@ -207,7 +229,7 @@ async function toggleVoice() {
         await call('/voice', { method: 'POST', body: fd })
         haptic()
         toast.add({ title: 'Расшифровываю голосовое', icon: 'i-lucide-audio-lines' })
-        for (const ms of [5000, 9000, 15000]) setTimeout(() => call<any[]>('/messages').then((m) => { if (m.length !== messages.value?.length) { messages.value = m; scrollChat() } }).catch(() => {}), ms)
+        for (const ms of [5000, 9000, 15000]) setTimeout(() => loadMessages().catch(() => {}), ms)
       }
       catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
       finally { voiceBusy.value = false }
@@ -237,11 +259,11 @@ const planDays = computed(() => planWeek.value.map(d => ({
   items: (plan.value ?? []).filter(i => i.date === d.key).sort((a, b) => a.time.localeCompare(b.time)),
 })).filter(d => d.items.length))
 const ideas = computed(() => (plan.value ?? []).filter(i => i.status === 'idea' && i.date >= today.value))
-const PLAN_LINE: Record<string, { t: string, c: string, about: string }> = {
-  idea: { t: 'Идея', c: 'text-warning', about: 'AI предложил тему. Примите её — и пост будет готов за сутки до даты, или подготовьте его прямо сейчас.' },
-  accepted: { t: 'Принята', c: 'text-primary', about: 'Тема принята. Пост подготовлю за сутки до публикации и пришлю на согласование.' },
-  drafted: { t: 'Пост готов', c: 'text-success', about: 'Пост по этой теме готов — откройте его, чтобы проверить и одобрить.' },
-  skipped: { t: 'Пропущена', c: 'text-muted', about: 'Тема пропущена. Её можно вернуть.' },
+const PLAN_LINE: Record<string, { t: string, c: string }> = {
+  idea: { t: 'Идея', c: 'text-warning' },
+  accepted: { t: 'Принята', c: 'text-primary' },
+  drafted: { t: 'Пост готов', c: 'text-success' },
+  skipped: { t: 'Пропущена', c: 'text-muted' },
 }
 const dayTitle = (key: string) => new Intl.DateTimeFormat('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(`${key}T12:00:00Z`)).replace(/^./, c => c.toUpperCase())
 const dayShort = (key: string) => new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long' }).format(new Date(`${key}T12:00:00Z`))
@@ -261,29 +283,45 @@ function openDay(key: string) { goTab('plan'); weekOffset.value = 0; nextTick(()
 const idea = ref<any | null>(null)
 const ideaOpen = computed({ get: () => !!idea.value, set: (v) => { if (!v) idea.value = null } })
 async function draftNow(i: any) {
+  if (busy.value) return
   busy.value = `plan:${i.id}`
   try {
     const row = await call(`/plan/${i.id}/draft`, { method: 'POST' })
     plan.value = plan.value?.map(x => x.id === i.id ? { ...x, ...row } : x) ?? null
     idea.value = null
-    toast.add({ title: 'Готовлю пост', description: 'Пришлю на согласование через 1–2 минуты', icon: 'i-lucide-sparkles', color: 'primary' })
+    toast.add({ title: 'Готовлю пост', icon: 'i-lucide-sparkles', color: 'primary' })
     haptic()
   }
   catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
   finally { busy.value = '' }
 }
+async function patchPlan(id: string, status: 'accepted' | 'skipped') {
+  const row = await call(`/plan/${id}`, { method: 'PATCH', body: { status } })
+  plan.value = plan.value?.map(i => i.id === id ? { ...i, ...row } : i) ?? null
+  if (idea.value?.id === id) idea.value = status === 'skipped' ? null : { ...idea.value, ...row }
+}
 async function setPlan(id: string, status: 'accepted' | 'skipped') {
+  if (busy.value) return
+  busy.value = `set:${id}`
   try {
-    const row = await call(`/plan/${id}`, { method: 'PATCH', body: { status } })
-    plan.value = plan.value?.map(i => i.id === id ? { ...i, ...row } : i) ?? null
-    if (idea.value?.id === id) idea.value = { ...idea.value, ...row }
+    await patchPlan(id, status)
     haptic()
   }
   catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
+  finally { busy.value = '' }
 }
 async function acceptIdeas() {
-  for (const i of ideas.value) await setPlan(i.id, 'accepted')
-  toast.add({ title: 'Идеи приняты', description: 'Черновики появятся в назначенные дни', icon: 'i-lucide-circle-check', color: 'success' })
+  if (busy.value) return
+  busy.value = 'ideas'
+  const list = [...ideas.value]
+  let done = 0
+  try {
+    for (const i of list) { await patchPlan(i.id, 'accepted'); done++ }
+    haptic()
+    toast.add({ title: `Принято: ${plural(done, 'идея', 'идеи', 'идей')}`, icon: 'i-lucide-circle-check', color: 'success' })
+  }
+  catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
+  finally { busy.value = '' }
 }
 
 const mins = (s: number) => !s ? '—' : s < 3600 ? `${Math.max(1, Math.round(s / 60))} мин` : `${Math.round(s / 360) / 10} ч`
@@ -295,9 +333,9 @@ const bests = computed(() => {
     return list.length > 1 ? { label, icon, value: list[0].label, views: list[0].avgViews } : null
   }
   return [
-    pick(perf.value.byTemplate, 'лучший макет', 'i-lucide-layout-template'),
-    pick(perf.value.byRubric, 'лучшая рубрика', 'i-lucide-tag'),
-    pick(perf.value.byDaypart, 'лучшее время', 'i-lucide-clock'),
+    pick(perf.value.byTemplate, 'Лучший макет', 'i-lucide-layout-template'),
+    pick(perf.value.byRubric, 'Лучшая рубрика', 'i-lucide-tag'),
+    pick(perf.value.byDaypart, 'Лучшее время', 'i-lucide-clock'),
   ].filter(Boolean) as Array<{ label: string, icon: string, value: string, views: number }>
 })
 const period = ref<7 | 30>(7)
@@ -314,7 +352,9 @@ const plural = (n: number, one: string, few: string, many: string) => {
   const a = Math.abs(n) % 100, b = a % 10
   return `${nf(n)} ${a > 10 && a < 20 ? many : b === 1 ? one : b > 1 && b < 5 ? few : many}`
 }
-const secs = (ms: number) => ms < 1000 ? 'меньше секунды' : ms < 60_000 ? `${Math.round(ms / 1000)} с` : `${Math.round(ms / 6000) / 10} мин`
+const secs = (ms: number) => ms < 1000 ? '<1 с' : ms < 60_000 ? `${Math.round(ms / 1000)} с` : `${String(Math.round(ms / 6000) / 10).replace('.', ',')} мин`
+const num = (v: number | null | undefined) => v === null || v === undefined ? '—' : nf(v)
+const usd = (v: number | string) => new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(Number(v) || 0)
 const TREND = {
   views: { label: 'Просмотры', unit: (n: number) => plural(n, 'просмотр', 'просмотра', 'просмотров') },
   clicks: { label: 'Переходы', unit: (n: number) => plural(n, 'переход', 'перехода', 'переходов') },
@@ -330,7 +370,7 @@ const funnel = computed(() => {
   const pct = (n: number) => f.created ? `${Math.round(n / f.created * 100)}%` : null
   return [
     { label: 'Подготовлено', value: f.created, hint: null },
-    { label: 'Ушло на согласование', value: f.sent, hint: pct(f.sent) },
+    { label: 'Отправлено на согласование', value: f.sent, hint: pct(f.sent) },
     { label: 'Одобрено', value: f.approved, hint: pct(f.approved) },
     { label: 'Опубликовано', value: f.published, hint: pct(f.published) },
   ]
@@ -355,14 +395,14 @@ const approverStack = (a: any) => [
   { label: 'На доработку', value: a.changes, color: 'bg-petrol-400' },
   { label: 'Отклонил', value: a.rejected, color: 'bg-rose-500' },
 ]
-const aiItems = computed(() => (dash.value?.ai ?? []).slice(0, 6).map((a: any) => ({ label: a.label, value: a.calls, hint: `по ${secs(a.ms)}` })))
+const aiItems = computed(() => (dash.value?.ai ?? []).slice(0, 6).map((a: any) => ({ label: a.label, value: a.calls, hint: secs(a.ms) })))
 const kpis = computed(() => summary.value
   ? [
-      { label: 'Подготовлено', value: summary.value.created, icon: 'i-lucide-sparkles', tone: 'brand', spark: dash.value?.daily.map((d: any) => d.created) },
-      { label: 'Опубликовано', value: summary.value.published, icon: 'i-lucide-send', tone: 'emerald', spark: dash.value?.daily.map((d: any) => d.published) },
-      { label: 'Ждут решения', value: summary.value.waiting, icon: 'i-lucide-hourglass', tone: 'amber' },
-      { label: 'Отклонено', value: summary.value.rejected, icon: 'i-lucide-ban', tone: 'rose' },
-      { label: 'Подписчики', value: summary.value.subscribers ?? '—', delta: summary.value.subscribersDelta, icon: 'i-lucide-users-round', tone: 'sky', spark: dash.value?.subscribers.map((d: any) => d.value) },
+      { label: 'Подготовлено', value: num(summary.value.created), icon: 'i-lucide-sparkles', tone: 'brand', spark: dash.value?.daily.map((d: any) => d.created) },
+      { label: 'Опубликовано', value: num(summary.value.published), icon: 'i-lucide-send', tone: 'emerald', spark: dash.value?.daily.map((d: any) => d.published) },
+      { label: 'На согласовании', value: num(summary.value.waiting), icon: 'i-lucide-hourglass', tone: 'amber' },
+      { label: 'Отклонено', value: num(summary.value.rejected), icon: 'i-lucide-ban', tone: 'rose' },
+      { label: 'Подписчики', value: num(summary.value.subscribers), delta: summary.value.subscribersDelta, icon: 'i-lucide-users-round', tone: 'sky', spark: dash.value?.subscribers.map((d: any) => d.value) },
       { label: 'Время согласования', value: mins(summary.value.approvals.avgApproveSec), icon: 'i-lucide-timer', tone: 'indigo' },
     ]
   : [])
@@ -372,10 +412,10 @@ const stamp = ref(Date.now())
 const version = computed(() => detail.value?.versions?.find((v: any) => v.id === shownVersion.value) ?? detail.value?.current_version ?? null)
 const isCurrent = computed(() => version.value?.id === detail.value?.current_version?.id)
 const editable = computed(() => detail.value?.kind === 'post' && ['draft', 'in_review', 'approved', 'scheduled'].includes(detail.value?.status) && isCurrent.value)
-const versionTabs = computed(() => (detail.value?.versions ?? []).map((v: any) => ({ label: `v${v.n}`, value: v.id })))
+const versionTabs = computed(() => (detail.value?.versions ?? []).map((v: any) => ({ label: String(v.n), value: v.id })))
 const approvalsNow = computed(() => (detail.value?.approvals ?? []).filter((a: any) => a.version_id === detail.value?.current_version?.id))
 const DECISION: Record<string, { t: string, c: string, tone: string }> = {
-  pending: { t: 'Ждёт решения', c: 'text-warning', tone: 'slate' }, approved: { t: 'Одобрил', c: 'text-success', tone: 'emerald' },
+  pending: { t: 'Ждём ответа', c: 'text-warning', tone: 'slate' }, approved: { t: 'Одобрил', c: 'text-success', tone: 'emerald' },
   rejected: { t: 'Отклонил', c: 'text-error', tone: 'rose' }, changes_requested: { t: 'Попросил правки', c: 'text-primary', tone: 'sky' },
   superseded: { t: 'Решение уже принято', c: 'text-muted', tone: 'slate' },
 }
@@ -385,25 +425,33 @@ const warnings = computed(() => (version.value?.warnings ?? []).map((w: string) 
   return rest.length ? { title: rest.join(': '), subtitle: h } : { title: w, subtitle: 'Замечание' }
 }))
 
+let openSeq = 0
 async function open(id: string) {
+  const seq = ++openSeq
   opening.value = true
   try {
-    detail.value = await call(`/posts/${id}`)
-    shownVersion.value = detail.value.current_version?.id ?? ''
+    const d = await call(`/posts/${id}`)
+    if (seq !== openSeq) return
+    detail.value = d
+    shownVersion.value = d.current_version?.id ?? ''
     stamp.value = Date.now()
     scroller.value?.scrollTo({ top: 0 })
   }
-  catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
-  finally { opening.value = false }
+  catch (e: any) { if (seq === openSeq) toast.add({ title: e.message, color: 'error' }) }
+  finally { if (seq === openSeq) opening.value = false }
 }
 async function refreshDetail() {
-  if (!detail.value) return
-  const d = await call(`/posts/${detail.value.id}`)
+  const id = detail.value?.id
+  if (!id) return
+  const d = await call(`/posts/${id}`)
+  if (detail.value?.id !== id) return
   const changed = d.current_version?.id !== detail.value.current_version?.id
   detail.value = d
   if (changed) { shownVersion.value = d.current_version?.id ?? ''; stamp.value = Date.now() }
 }
 function back() {
+  openSeq++
+  opening.value = false
   detail.value = null
   reviseOpen.value = false
   editOpen.value = false
@@ -418,13 +466,15 @@ const rejectReason = ref('')
 const REJECT_CHIPS = ['Не по теме', 'Неточные факты', 'Не тот тон', 'Не сейчас']
 
 async function decide(action: 'a' | 'r') {
+  const d = detail.value
+  if (busy.value || !d?.approval_id) return
   busy.value = action
   try {
-    await call(`/approvals/${detail.value.approval_id}`, { method: 'POST', body: { action, comment: action === 'r' ? rejectReason.value.trim() : undefined } })
+    await call(`/approvals/${d.approval_id}`, { method: 'POST', body: { action, comment: action === 'r' ? rejectReason.value.trim() : undefined } })
     rejectOpen.value = false
     rejectReason.value = ''
     toast.add(action === 'a'
-      ? { title: 'Одобрено', description: detail.value.scheduled_at ? `Выйдет ${fmt(detail.value.scheduled_at)}` : 'Публикую', color: 'success', icon: 'i-lucide-circle-check' }
+      ? { title: 'Одобрено', description: d.scheduled_at ? `Выйдет: ${fmt(d.scheduled_at)}` : undefined, color: 'success', icon: 'i-lucide-circle-check' }
       : { title: 'Отклонено', color: 'neutral', icon: 'i-lucide-ban' })
     haptic(action === 'r' ? 'warning' : 'success')
     back()
@@ -438,28 +488,35 @@ const canSendNow = computed(() => isApprover.value && detail.value?.kind === 'po
   && (['approved', 'scheduled'].includes(detail.value?.status) || (detail.value?.status === 'in_review' && !!detail.value?.approval_id)))
 const timeOpen = ref(false)
 const timeValue = ref('')
-const toLocalInput = (v: string | null) => {
+const toTzInput = (v: string | Date | null) => {
   if (!v) return ''
-  const d = new Date(v)
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: tz.value, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(v)).map(x => [x.type, x.value]))
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`
 }
+const fromTzInput = (s: string) => {
+  const guess = new Date(`${s}:00Z`)
+  return new Date(2 * guess.getTime() - new Date(`${toTzInput(guess)}:00Z`).getTime())
+}
+const quickTimes = computed(() => {
+  if (!timeOpen.value) return []
+  const now = Date.now()
+  return [{ l: 'Сегодня, 18:00', d: 0, h: 18 }, { l: 'Завтра, 10:00', d: 1, h: 10 }, { l: 'Завтра, 18:00', d: 1, h: 18 }]
+    .map(q => ({ l: q.l, v: `${ymd(new Date(now + q.d * 86400_000))}T${String(q.h).padStart(2, '0')}:00` }))
+    .filter(q => fromTzInput(q.v).getTime() > now + 5 * 60_000)
+})
 function openTime() {
-  timeValue.value = toLocalInput(detail.value?.scheduled_at ?? null)
+  timeValue.value = toTzInput(detail.value?.scheduled_at ?? null)
   timeOpen.value = true
 }
-function quickTime(days: number, hour: number) {
-  const d = new Date()
-  d.setDate(d.getDate() + days)
-  d.setHours(hour, 0, 0, 0)
-  timeValue.value = toLocalInput(d.toISOString())
-}
 async function saveTime(clear = false) {
+  if (busy.value) return
   busy.value = 'time'
   try {
-    const res = await call(`/posts/${detail.value.id}/schedule`, { method: 'POST', body: { scheduled_at: clear || !timeValue.value ? null : new Date(timeValue.value).toISOString() } })
+    const res = await call(`/posts/${detail.value.id}/schedule`, { method: 'POST', body: { scheduled_at: clear || !timeValue.value ? null : fromTzInput(timeValue.value).toISOString() } })
     timeOpen.value = false
     toast.add(res.needs_approval
-      ? { title: 'Время изменено', description: 'Пост снова ушёл на согласование', color: 'primary', icon: 'i-lucide-clock' }
+      ? { title: 'Время изменено', description: 'Нужно согласовать заново', color: 'primary', icon: 'i-lucide-clock' }
       : { title: 'Время изменено', color: 'success', icon: 'i-lucide-clock' })
     haptic()
     await refreshDetail()
@@ -469,10 +526,11 @@ async function saveTime(clear = false) {
 }
 const canResend = computed(() => editable.value && ['draft', 'in_review'].includes(detail.value?.status) && !detail.value?.revising)
 async function resend() {
+  if (busy.value) return
   busy.value = 'resend'
   try {
     await call(`/posts/${detail.value.id}/send-for-approval`, { method: 'POST' })
-    toast.add({ title: 'Отправлено согласующим', description: 'Карточка с текущим видом поста', color: 'success', icon: 'i-lucide-send' })
+    toast.add({ title: 'Отправлено на согласование', color: 'success', icon: 'i-lucide-send' })
     haptic('success')
     await refreshDetail()
   }
@@ -480,12 +538,13 @@ async function resend() {
   finally { busy.value = '' }
 }
 async function sendNow() {
+  if (busy.value) return
   busy.value = 'now'
   try {
     const res = await call(`/posts/${detail.value.id}/publish-now`, { method: 'POST' })
     toast.add(res.partial
-      ? { title: 'Одобрено', description: 'Пост выйдет, когда одобрят остальные согласующие', color: 'primary', icon: 'i-lucide-users' }
-      : { title: 'Публикую', description: 'Ссылка придёт в чат с ботом', color: 'success', icon: 'i-lucide-send' })
+      ? { title: 'Одобрено', description: 'Ждём остальных согласующих', color: 'primary', icon: 'i-lucide-users' }
+      : { title: 'Публикую', color: 'success', icon: 'i-lucide-send' })
     haptic('success')
     setTimeout(() => refreshDetail().catch(() => {}), 5000)
     await refreshDetail()
@@ -498,10 +557,11 @@ const reviseOpen = ref(false)
 const comment = ref('')
 const CHIPS = ['Сделай короче', 'Добавь призыв к действию', 'Проще, без терминов', 'Другой заголовок']
 async function sendRevision() {
+  if (busy.value) return
   busy.value = 'c'
   try {
     await call(`/approvals/${detail.value.approval_id}`, { method: 'POST', body: { action: 'c', comment: comment.value.trim() } })
-    toast.add({ title: 'Отправлено на доработку', description: 'Новая версия придёт на согласование', color: 'primary', icon: 'i-lucide-wand-sparkles' })
+    toast.add({ title: 'Отправлено на доработку', color: 'primary', icon: 'i-lucide-wand-sparkles' })
     haptic()
     comment.value = ''
     reviseOpen.value = false
@@ -524,6 +584,7 @@ watch(fieldsOpen, (o) => {
   for (const f of cardFieldList.value) cardForm[f.key] = card.value?.fields?.[f.key] ?? ''
 })
 async function changeCard(body: any, what: string) {
+  if (busy.value) return
   busy.value = what
   try {
     const res = await call(`/posts/${detail.value.id}/card`, { method: 'POST', body })
@@ -532,8 +593,8 @@ async function changeCard(body: any, what: string) {
     templateOpen.value = false
     fieldsOpen.value = false
     haptic()
-    if (res.new_version) toast.add({ title: 'Создана новая версия', description: 'Её нужно одобрить заново', color: 'primary' })
-    else if (res.overflow?.length) toast.add({ title: 'Часть текста не поместилась', description: 'Сократите текст на карточке', color: 'warning' })
+    if (res.new_version) toast.add({ title: 'Новая версия на согласовании', color: 'primary' })
+    else if (res.overflow?.length) toast.add({ title: 'Текст не поместился на карточку', color: 'warning' })
   }
   catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
   finally { busy.value = '' }
@@ -564,19 +625,21 @@ function onSlide() {
 function goSlide(i: number) { slider.value?.scrollTo({ left: i * (slider.value?.clientWidth ?? 0), behavior: 'smooth' }) }
 const galleryInput = ref<HTMLInputElement | null>(null)
 async function changeLayout(body: any, what: string) {
+  if (busy.value) return
   busy.value = what
   try {
     const res = await call(`/posts/${detail.value.id}/layout`, { method: 'POST', body })
     await refreshDetail()
     haptic()
-    if (res.new_version) toast.add({ title: 'Создана новая версия', description: 'Её нужно одобрить заново', color: 'primary' })
+    if (res.new_version) toast.add({ title: 'Новая версия на согласовании', color: 'primary' })
     if (body?.gallery === 'add' || body?.gallery === 'generate' || body instanceof FormData) nextTick(() => goSlide(slides.value.length - 1))
   }
   catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
   finally { busy.value = '' }
 }
 function generateGallery() {
-  toast.add({ title: 'Генерирую фото', description: 'Около минуты', color: 'primary', icon: 'i-lucide-sparkles' })
+  if (busy.value) return
+  toast.add({ title: 'Генерирую фото', color: 'primary', icon: 'i-lucide-sparkles' })
   return changeLayout({ gallery: 'generate' }, 'gal-gen')
 }
 async function uploadGallery(e: Event) {
@@ -615,13 +678,15 @@ function insertMd(t: typeof MD_TOOLS[number]) {
 const editForm = reactive({ title: '', text: '' })
 watch(editOpen, (o) => { if (o) { editForm.title = version.value?.title ?? ''; editForm.text = version.value?.text ?? '' } })
 async function saveEdit() {
+  if (busy.value) return
   busy.value = 'edit'
   try {
-    await call(`/posts/${detail.value.id}`, { method: 'PATCH', body: { title: editForm.title, text: editForm.text } })
+    const res = await call(`/posts/${detail.value.id}`, { method: 'PATCH', body: { title: editForm.title, text: editForm.text } })
     editOpen.value = false
+    if (res?.changed === false) return
     await refreshDetail()
     stamp.value = Date.now()
-    toast.add({ title: 'Текст обновлён', description: 'Новая версия ушла на согласование', icon: 'i-lucide-pencil', color: 'primary' })
+    toast.add({ title: 'Новая версия на согласовании', icon: 'i-lucide-pencil', color: 'primary' })
     haptic()
   }
   catch (e: any) { toast.add({ title: e.message, color: 'error' }) }
@@ -633,18 +698,24 @@ const newForm = reactive({ title: '', text: '' })
 const newFile = ref<File | null>(null)
 const newFileInput = ref<HTMLInputElement | null>(null)
 async function createOwn() {
+  if (busy.value) return
   busy.value = 'new'
   try {
     const { id } = await call('/posts', { method: 'POST', body: { title: newForm.title, text: newForm.text } })
+    let imageFailed = false
     if (newFile.value) {
       const fd = new FormData()
       fd.append('mode', 'custom')
       fd.append('file', newFile.value)
-      await call(`/posts/${id}/card`, { method: 'POST', body: fd }).catch(() => {})
+      await call(`/posts/${id}/card`, { method: 'POST', body: fd }).catch(() => { imageFailed = true })
     }
     newOpen.value = false
-    newForm.title = ''; newForm.text = ''; newFile.value = null
-    toast.add({ title: 'Пост создан', description: 'Ушёл на согласование', icon: 'i-lucide-circle-check', color: 'success' })
+    newForm.title = ''
+    newForm.text = ''
+    newFile.value = null
+    toast.add(imageFailed
+      ? { title: 'Пост на согласовании', description: 'Картинку загрузить не удалось', icon: 'i-lucide-image-off', color: 'warning' }
+      : { title: 'Пост на согласовании', icon: 'i-lucide-circle-check', color: 'success' })
     haptic()
     await open(id)
   }
@@ -674,26 +745,34 @@ async function openFact(f: any) {
 }
 
 async function copyLink(url: string) {
-  try { await navigator.clipboard.writeText(url) } catch {}
-  toast.add({ title: 'Ссылка скопирована', icon: 'i-lucide-copy', color: 'neutral' })
+  try {
+    await navigator.clipboard.writeText(url)
+    toast.add({ title: 'Ссылка скопирована', icon: 'i-lucide-copy', color: 'neutral' })
+  }
+  catch { toast.add({ title: 'Не удалось скопировать ссылку', color: 'error' }) }
 }
 
 const switcherOpen = ref(false)
 async function switchTenant(id: string) {
   switcherOpen.value = false
   if (id === me.value?.tenant.id) return
-  await call('/tenant', { method: 'POST', body: { tenant_id: id } })
-  detail.value = null
+  try { await call('/tenant', { method: 'POST', body: { tenant_id: id } }) }
+  catch (e: any) { toast.add({ title: e.message, color: 'error' }); return }
+  back()
   posts.value = plan.value = summary.value = messages.value = null
+  filter.value = 'all'
+  weekOffset.value = 0
+  selectedDay.value = ''
   await load()
-  const t = me.value?.tenants.find((x: any) => x.id === id)
-  toast.add({ title: `Компания: ${t?.name}`, description: 'Данные других компаний недоступны', icon: 'i-lucide-shield-check', color: 'neutral' })
+  if (!me.value || error.value) return
+  if (tab.value !== 'home') loadTab()
+  toast.add({ title: me.value.tenant.name, icon: 'i-lucide-building-2', color: 'neutral' })
 }
 
 const tgBack = () => { if (detail.value) back(); else backTab() }
 watch([detail, tabBack], ([d, t]) => {
   const b = tg()?.BackButton
-  if (!b) return
+  if (!b || !tgAtLeast('6.1')) return
   b.offClick?.(tgBack)
   if (d || t) { b.show(); b.onClick(tgBack) }
   else b.hide()
@@ -701,24 +780,29 @@ watch([detail, tabBack], ([d, t]) => {
 
 function launchInitData(w: any): string {
   const signed = (v: string | null | undefined) => !!v && /(^|&)hash=/.test(v)
-  if (signed(w?.initData)) return w.initData
-  let raw = location.hash
-  try { raw = sessionStorage.getItem('tg-launch-hash') || raw } catch {}
-  const fromHash = new URLSearchParams(raw.replace(/^#/, '')).get('tgWebAppData')
-  return signed(fromHash) ? fromHash! : ''
+  const remember = (v: string) => { try { sessionStorage.setItem('tg-init-data', v) } catch {} return v }
+  if (signed(w?.initData)) return remember(w.initData)
+  for (const raw of [location.hash, (() => { try { return sessionStorage.getItem('tg-launch-hash') ?? '' } catch { return '' } })()]) {
+    const fromHash = new URLSearchParams(raw.replace(/^#/, '')).get('tgWebAppData')
+    if (signed(fromHash)) return remember(fromHash!)
+  }
+  try { const saved = sessionStorage.getItem('tg-init-data'); if (signed(saved)) return saved! } catch {}
+  return ''
 }
 
 onMounted(() => {
   colorMode.preference = 'light'
   const start = () => {
     const w = tg()
-    hasTgBack.value = !!w?.BackButton && !!w?.platform && w.platform !== 'unknown'
+    hasTgBack.value = !!w?.BackButton && !!w?.platform && w.platform !== 'unknown' && tgAtLeast('6.1')
     initData.value = launchInitData(w)
     w?.ready?.()
     w?.expand?.()
-    w?.setHeaderColor?.('#eef3f4')
-    w?.setBackgroundColor?.('#eef3f4')
-    w?.setBottomBarColor?.('#ffffff')
+    if (tgAtLeast('6.1')) {
+      w?.setHeaderColor?.('#eef3f4')
+      w?.setBackgroundColor?.('#eef3f4')
+    }
+    if (tgAtLeast('7.10')) w?.setBottomBarColor?.('#ffffff')
     if (!initData.value) { error.value = 'Откройте приложение из Telegram: кнопка «Кабинет» в чате с ботом'; return }
     load()
   }
@@ -732,8 +816,11 @@ onMounted(() => {
 <template>
   <div class="mini-app flex min-h-dvh justify-center sm:items-center sm:py-6">
     <div class="relative flex h-dvh w-full max-w-[430px] flex-col sm:transform-gpu overflow-hidden bg-default sm:h-[min(880px,calc(100dvh-3rem))] sm:rounded-[2.75rem] sm:shadow-2xl sm:shadow-slate-900/15 sm:ring-[10px] sm:ring-white">
-      <UEmpty v-if="error" icon="i-lucide-lock" :title="error" class="flex-1 justify-center px-6">
-        <template #header><img src="/brand/icon.png" alt="" class="mx-auto mb-4 h-14 w-auto"></template>
+      <UEmpty
+        v-if="error" :icon="canRetry ? 'i-lucide-cloud-off' : 'i-lucide-lock'" :title="error" class="flex-1 justify-center px-6"
+        :actions="canRetry ? [{ label: 'Повторить', icon: 'i-lucide-refresh-cw', color: 'neutral', variant: 'soft', onClick: retry }] : undefined"
+      >
+        <template #leading><img src="/brand/icon.png" alt="" class="mx-auto mb-2 h-14 w-auto"></template>
       </UEmpty>
 
       <div v-else-if="!me" class="space-y-3 p-4 pt-8">
@@ -753,13 +840,16 @@ onMounted(() => {
             </h1>
           </div>
           <button
-            type="button" aria-label="Сменить компанию"
+            v-if="me.tenants.length > 1" type="button" aria-label="Сменить компанию"
             class="relative mb-1 grid size-12 shrink-0 place-items-center rounded-full bg-elevated shadow-sm transition active:scale-95"
             @click="switcherOpen = true"
           >
             <img src="/brand/icon.png" alt="" class="h-7 w-auto">
-            <span class="absolute bottom-0 right-0 size-3 rounded-full bg-success ring-2 ring-default" />
+            <span class="absolute -bottom-0.5 -right-0.5 grid size-5 place-items-center rounded-full bg-elevated text-muted shadow-sm ring-1 ring-default"><UIcon name="i-lucide-chevrons-up-down" class="size-3" /></span>
           </button>
+          <span v-else class="mb-1 grid size-12 shrink-0 place-items-center rounded-full bg-elevated shadow-sm">
+            <img src="/brand/icon.png" alt="" class="h-7 w-auto">
+          </span>
         </header>
 
         <main ref="scroller" class="no-scrollbar flex-1 overflow-y-auto px-3 pb-6" :class="detail && 'pt-4'">
@@ -810,14 +900,13 @@ onMounted(() => {
                     <UIcon name="i-lucide-x" class="size-3.5" />
                   </button>
                 </div>
-                <button type="button" class="grid size-16 shrink-0 place-items-center rounded-tile-sm bg-muted text-primary" aria-label="Фото из фотобанка" :disabled="!!busy || slides.length >= 10" @click="changeLayout({ gallery: 'add' }, 'gal-add')">
-                  <UIcon :name="busy === 'gal-add' ? 'i-lucide-loader-circle' : 'i-lucide-images'" class="size-6" :class="busy === 'gal-add' && 'animate-spin'" />
-                </button>
-                <button type="button" class="grid size-16 shrink-0 place-items-center rounded-tile-sm bg-muted text-primary" aria-label="Сгенерировать фото" :disabled="!!busy || slides.length >= 10" @click="generateGallery">
-                  <UIcon :name="busy === 'gal-gen' ? 'i-lucide-loader-circle' : 'i-lucide-sparkles'" class="size-6" :class="busy === 'gal-gen' && 'animate-spin'" />
-                </button>
-                <button type="button" class="grid size-16 shrink-0 place-items-center rounded-tile-sm bg-muted text-primary" aria-label="Загрузить фото" :disabled="!!busy || slides.length >= 10" @click="galleryInput?.click()">
-                  <UIcon :name="busy === 'gal-up' ? 'i-lucide-loader-circle' : 'i-lucide-image-plus'" class="size-6" :class="busy === 'gal-up' && 'animate-spin'" />
+                <button
+                  v-for="g in ([{ k: 'gal-add', l: 'Фотобанк', a: 'Добавить фото из фотобанка', i: 'i-lucide-images' }, { k: 'gal-gen', l: 'Нарисовать', a: 'Сгенерировать фото', i: 'i-lucide-sparkles' }, { k: 'gal-up', l: 'Загрузить', a: 'Загрузить фото', i: 'i-lucide-image-plus' }] as const)" :key="g.k"
+                  type="button" class="flex size-16 shrink-0 flex-col items-center justify-center gap-1 rounded-tile-sm bg-muted text-primary disabled:opacity-50" :aria-label="g.a"
+                  :disabled="!!busy || slides.length >= 10" @click="g.k === 'gal-add' ? changeLayout({ gallery: 'add' }, g.k) : g.k === 'gal-gen' ? generateGallery() : galleryInput?.click()"
+                >
+                  <UIcon :name="busy === g.k ? 'i-lucide-loader-circle' : g.i" class="size-5" :class="busy === g.k && 'animate-spin'" />
+                  <span class="text-[10px] font-semibold leading-none">{{ g.l }}</span>
                 </button>
                 <input ref="galleryInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" @change="uploadGallery">
               </div>
@@ -837,30 +926,29 @@ onMounted(() => {
             <div v-if="editable && version?.image_url && !version?.video" class="grid grid-cols-2 gap-2">
               <template v-if="!card?.custom && CARD_TEMPLATES[(card?.template ?? 'project') as CardTemplateId].photo">
                 <UButton icon="i-lucide-refresh-cw" label="Другое фото" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :loading="busy === 'photo'" :disabled="!!busy" @click="changeCard({ photo: 'next' }, 'photo')" />
-                <UButton icon="i-lucide-sparkles" label="Сгенерировать" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :loading="busy === 'ai'" :disabled="!!busy" @click="changeCard({ photo: 'ai' }, 'ai')" />
-                <UButton icon="i-lucide-image-up" label="Своё фото" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :loading="busy === 'upload'" :disabled="!!busy" @click="photoInput?.click()" />
+                <UButton icon="i-lucide-sparkles" label="Нарисовать" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :loading="busy === 'ai'" :disabled="!!busy" @click="changeCard({ photo: 'ai' }, 'ai')" />
+                <UButton icon="i-lucide-image-up" label="Загрузить фото" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :loading="busy === 'upload'" :disabled="!!busy" @click="photoInput?.click()" />
               </template>
-              <UButton icon="i-lucide-image" label="Своя картинка" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :loading="busy === 'custom'" :disabled="!!busy" @click="customInput?.click()" />
+              <UButton icon="i-lucide-image" label="Готовая картинка" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :loading="busy === 'custom'" :disabled="!!busy" @click="customInput?.click()" />
               <UButton icon="i-lucide-layout-template" :label="card?.custom ? 'Вернуть макет' : 'Макет'" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :disabled="!!busy" @click="templateOpen = true" />
-              <UButton v-if="!card?.custom" icon="i-lucide-type" label="Текст на карточке" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :disabled="!!busy" @click="fieldsOpen = true" />
+              <UButton v-if="!card?.custom" icon="i-lucide-type" label="Надписи" color="neutral" variant="outline" class="h-10 w-full justify-center rounded-full bg-elevated px-3 ring-0 shadow-sm" :disabled="!!busy" @click="fieldsOpen = true" />
               <input ref="photoInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" @change="uploadPhoto">
               <input ref="customInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" @change="uploadCustom">
             </div>
-            <p v-if="busy === 'ai'" class="px-2 text-caption text-muted">Рисую фото по смыслу поста — это около минуты</p>
             <p v-if="editable && !card?.custom && card?.photo && card.photo.source !== 'none'" class="px-2 text-caption text-muted">
               {{ PHOTO_SOURCE_LABELS[card.photo.source as keyof typeof PHOTO_SOURCE_LABELS] }}<template v-if="card.photo.credit"> · {{ card.photo.credit }}</template>
             </p>
 
             <MiniSection v-if="detail.status === 'failed'" :title="detail.publication?.status === 'uncertain' ? 'Исход неясен' : 'Публикация не удалась'" icon="i-lucide-triangle-alert" tone="error">
-              <p class="text-body text-toned">{{ detail.publication?.error || 'Оператор сервиса уже получил уведомление' }}</p>
+              <p class="text-body text-toned [overflow-wrap:anywhere]">{{ detail.publication?.error || 'Оператор уведомлён' }}</p>
             </MiniSection>
 
-            <MiniSection v-if="detail.status === 'published'" title="Опубликован" icon="i-lucide-circle-check" tone="success">
+            <MiniSection v-if="detail.status === 'published'" title="В канале" icon="i-lucide-circle-check" tone="success">
               <MiniRow icon="i-lucide-send" tone="emerald" :title="detail.channel ?? 'Канал'" :subtitle="fmt(detail.publication?.published_at)" />
               <div v-if="detail.publication" class="grid grid-cols-3 text-center">
-                <div><p class="text-stat font-bold text-highlighted">{{ detail.publication.views ?? '—' }}</p><p class="mt-1 text-caption text-muted">просмотры</p></div>
-                <div><p class="text-stat font-bold text-highlighted">{{ detail.publication.reactions ?? '—' }}</p><p class="mt-1 text-caption text-muted">реакции</p></div>
-                <div><p class="text-stat font-bold text-highlighted">{{ detail.publication.clicks ?? 0 }}</p><p class="mt-1 text-caption text-muted">переходы</p></div>
+                <div><p class="text-stat font-bold text-highlighted">{{ num(detail.publication.views) }}</p><p class="mt-1 text-caption text-muted">просмотры</p></div>
+                <div><p class="text-stat font-bold text-highlighted">{{ num(detail.publication.reactions) }}</p><p class="mt-1 text-caption text-muted">реакции</p></div>
+                <div><p class="text-stat font-bold text-highlighted">{{ num(detail.publication.clicks ?? 0) }}</p><p class="mt-1 text-caption text-muted">переходы</p></div>
               </div>
               <div v-if="detail.publication?.url" class="flex gap-2">
                 <UButton label="Открыть в канале" icon="i-lucide-external-link" size="lg" class="h-12 flex-1 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" @click="openChannel(detail.publication.url)" />
@@ -869,20 +957,20 @@ onMounted(() => {
             </MiniSection>
 
             <MiniSection v-if="detail.revising || detail.status === 'draft'" title="Готовится" icon="i-lucide-sparkles">
-              <MiniRow icon="i-lucide-loader-circle" spin tone="brand" :title="detail.revising ? 'AI вносит правки' : 'AI пишет текст и подбирает факты'" subtitle="Обычно 1–2 минуты" />
+              <MiniRow icon="i-lucide-loader-circle" spin tone="brand" :title="detail.revising ? 'Вношу правки' : 'Пишу текст'" />
               <UProgress size="xs" />
             </MiniSection>
 
             <MiniSection title="Публикация" icon="i-lucide-send">
-              <MiniRow icon="i-lucide-send" tone="sky" :title="detail.channel ?? 'Канал не подключён'" subtitle="Telegram-канал" />
-              <button v-if="editable" type="button" class="block w-full text-left" @click="openTime">
-                <MiniRow icon="i-lucide-clock" tone="brand" :title="fmt(detail.scheduled_at)" subtitle="Время выхода">
+              <MiniRow icon="i-lucide-send" tone="sky" :title="detail.channel ?? 'Канал не подключён'" :subtitle="detail.channel ? PLATFORM[detail.platform] ?? detail.platform : undefined" />
+              <button v-if="editable" type="button" class="block w-full text-left" aria-label="Изменить время выхода" @click="openTime">
+                <MiniRow icon="i-lucide-clock" tone="brand" :title="whenOut(detail.scheduled_at)" subtitle="Время выхода">
                   <UIcon name="i-lucide-pencil" class="size-4 shrink-0 text-dimmed" />
                 </MiniRow>
               </button>
-              <MiniRow v-else icon="i-lucide-clock" tone="brand" :title="fmt(detail.scheduled_at)" subtitle="Время выхода" />
+              <MiniRow v-else-if="!['published', 'rejected'].includes(detail.status)" icon="i-lucide-clock" tone="brand" :title="whenOut(detail.scheduled_at)" subtitle="Время выхода" />
               <UButton
-                v-if="canResend" label="Отправить на согласование" icon="i-lucide-send-to-back" color="neutral" variant="soft"
+                v-if="canResend" :label="detail.status === 'in_review' ? 'Отправить повторно' : 'Отправить на согласование'" icon="i-lucide-send-to-back" color="neutral" variant="soft"
                 size="lg" block class="h-11 justify-center rounded-full" :loading="busy === 'resend'" :disabled="!!busy" @click="resend"
               />
               <UButton
@@ -894,49 +982,51 @@ onMounted(() => {
             <MiniSection :title="detail.kind === 'video_script' ? 'Сценарий' : 'Текст'" icon="i-lucide-align-left">
               <template v-if="versionTabs.length > 1 || editable" #right>
                 <UButton v-if="editable && versionTabs.length <= 1" icon="i-lucide-pencil" label="Изменить" color="neutral" variant="soft" size="sm" class="h-8 rounded-full px-3" @click="editOpen = true" />
-                <div v-else-if="versionTabs.length > 1" class="flex gap-0.5 rounded-full bg-muted p-0.5">
-                  <button
-                    v-for="t in versionTabs.slice(0, 4)" :key="t.value" type="button"
-                    class="h-7 rounded-full px-3 text-meta font-semibold transition" :class="shownVersion === t.value ? 'bg-petrol-900 text-white' : 'text-toned'"
-                    @click="shownVersion = t.value"
-                  >
-                    {{ t.label }}
-                  </button>
+                <div v-else-if="versionTabs.length > 1" class="flex items-center gap-2">
+                  <span class="text-meta text-muted">Версия</span>
+                  <div class="flex gap-0.5 rounded-full bg-muted p-0.5">
+                    <button
+                      v-for="t in versionTabs.slice(0, 4).reverse()" :key="t.value" type="button" :aria-label="`Версия ${t.label}`"
+                      class="h-7 min-w-7 rounded-full px-2.5 text-meta font-semibold tabular-nums transition" :class="shownVersion === t.value ? 'bg-petrol-900 text-white' : 'text-toned'"
+                      @click="shownVersion = t.value"
+                    >
+                      {{ t.label }}
+                    </button>
+                  </div>
                 </div>
               </template>
-              <p v-if="version?.comment" class="!mt-0 text-meta font-medium text-primary">Правка: «{{ version.comment }}»</p>
-              <div v-if="isRich && detail.kind === 'post'" class="space-y-3 text-body text-toned" v-html="renderMarkdown(version?.text ?? '')" />
-              <p v-else class="whitespace-pre-line text-body text-highlighted">{{ detail.kind === 'post' ? plainMarkdown(version?.text ?? '') : version?.text }}</p>
-              <p v-if="version?.hashtags?.length" class="text-meta font-semibold text-primary">{{ version.hashtags.join(' ') }}</p>
-              <UButton v-if="editable && versionTabs.length > 1" icon="i-lucide-pencil" label="Изменить текст вручную" color="neutral" variant="soft" block class="h-10 justify-center rounded-full" @click="editOpen = true" />
+              <p v-if="version?.comment" class="!mt-0 text-meta font-medium text-primary [overflow-wrap:anywhere]">Правка: «{{ version.comment }}»</p>
+              <div v-if="isRich && detail.kind === 'post'" class="space-y-3 text-body text-toned [overflow-wrap:anywhere]" v-html="renderMarkdown(version?.text ?? '')" />
+              <p v-else class="whitespace-pre-line text-body text-highlighted [overflow-wrap:anywhere]">{{ detail.kind === 'post' ? plainMarkdown(version?.text ?? '') : version?.text }}</p>
+              <p v-if="version?.hashtags?.length" class="text-meta font-semibold text-primary [overflow-wrap:anywhere]">{{ version.hashtags.join(' ') }}</p>
+              <UButton v-if="editable && versionTabs.length > 1" icon="i-lucide-pencil" label="Изменить текст" color="neutral" variant="soft" block class="h-10 justify-center rounded-full" @click="editOpen = true" />
             </MiniSection>
 
             <MiniSection title="Проверка" icon="i-lucide-shield-check">
-              <MiniRow v-for="w in warnings" :key="w.title" icon="i-lucide-triangle-alert" tone="amber" :title="w.title" :subtitle="w.subtitle" :lines="0" />
-              <MiniRow v-if="!warnings.length" icon="i-lucide-check" tone="emerald" title="Замечаний нет" subtitle="Текст прошёл проверку" />
+              <MiniRow v-for="(w, i) in warnings" :key="i" icon="i-lucide-triangle-alert" tone="amber" :title="w.title" :subtitle="w.subtitle" :lines="0" />
+              <MiniRow v-if="!warnings.length" icon="i-lucide-check" tone="emerald" title="Замечаний нет" />
               <button v-for="(f, i) in version?.facts ?? []" :key="i" type="button" class="block w-full text-left" :disabled="!f.chunk_id" @click="openFact(f)">
-                <MiniRow :icon="f.chunk_id ? 'i-lucide-book-open' : 'i-lucide-circle-help'" :tone="f.chunk_id ? 'brand' : 'amber'" :title="f.claim" :subtitle="f.chunk_id ? f.source_title : f.general ? 'Общеизвестный факт — сверьте' : 'Нет в материалах — проверьте'" :lines="0">
+                <MiniRow :icon="f.chunk_id ? 'i-lucide-book-open' : 'i-lucide-circle-help'" :tone="f.chunk_id ? 'brand' : 'amber'" :title="f.claim" :subtitle="f.chunk_id ? f.source_title : f.general ? 'Общеизвестный факт, сверьте' : 'Нет в базе знаний, проверьте'" :lines="0">
                   <UIcon v-if="f.chunk_id" name="i-lucide-chevron-right" class="size-5 shrink-0 text-dimmed" />
                 </MiniRow>
               </button>
             </MiniSection>
 
             <MiniSection v-if="approvalsNow.length" title="Согласующие" icon="i-lucide-users">
-              <template #right><span class="text-meta text-muted">{{ me.tenant.approval_rule === 'all' ? 'нужны все' : 'хватит одного' }}</span></template>
+              <template #right><span class="text-meta text-muted">{{ me.tenant.approval_rule === 'all' ? 'нужны все' : 'достаточно одного' }}</span></template>
               <MiniRow
                 v-for="a in approvalsNow" :key="a.id" :text="initials(a.member)" :tone="DECISION[a.decision]?.tone" :title="a.member ?? 'Участник'"
                 :subtitle="a.comment ? `«${a.comment}»` : undefined" :meta="DECISION[a.decision]?.t" :meta-class="DECISION[a.decision]?.c" :lines="0"
               />
-              <p class="text-caption text-muted">{{ me.tenant.approval_rule === 'all' ? 'Пост выйдет, когда одобрят все согласующие.' : 'Карточка приходит всем согласующим — пост выходит после первого одобрения.' }}</p>
             </MiniSection>
 
-            <p class="px-4 pb-2 text-center text-caption text-muted">
-              Версия {{ version?.n }} · {{ version?.author === 'human' ? 'правка вручную' : 'подготовил AI' }} · {{ fmt(version?.created_at) }}
+            <p v-if="version" class="px-4 pb-2 text-center text-caption text-muted">
+              Версия {{ version.n }} · {{ version.author === 'human' ? 'правка вручную' : 'подготовил AI' }} · {{ fmt(version.created_at) }}
             </p>
 
-            <div v-if="detail.approval_id" class="sticky -bottom-6 z-10 -mx-3 flex gap-2 rounded-t-card bg-elevated px-4 pb-6 pt-3 shadow-[0_-8px_24px_rgb(15_59_68/.06)]">
+            <div v-if="detail.approval_id" class="sticky -bottom-6 z-10 -mx-3 flex gap-2 rounded-t-card bg-elevated px-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-3 shadow-[0_-8px_24px_rgb(15_59_68/.06)]">
               <UButton label="Отклонить" color="error" variant="outline" size="lg" class="h-12 flex-1 justify-center rounded-full ring-[1.5px] ring-rose-200" :loading="busy === 'r'" :disabled="!!busy" @click="rejectOpen = true" />
-              <UButton label="Правка" icon="i-lucide-wand-sparkles" color="neutral" variant="soft" size="lg" class="h-12 flex-1 justify-center rounded-full" :disabled="!!busy" @click="reviseOpen = true" />
+              <UButton label="Доработать" color="neutral" variant="soft" size="lg" class="h-12 flex-1 justify-center rounded-full" :disabled="!!busy" @click="reviseOpen = true" />
               <UButton label="Одобрить" icon="i-lucide-check" size="lg" class="h-12 flex-[1.3] justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'a'" :disabled="!!busy" @click="decide('a')" />
             </div>
           </section>
@@ -949,10 +1039,10 @@ onMounted(() => {
                 <MiniSection v-if="attention.length" title="Требуют внимания" icon="i-lucide-triangle-alert" :count="attention.length">
                   <MiniPostRow v-for="p in attention" :key="p.id" :post="p" :img="img" :fmt="fmt" @open="open(p.id)" />
                 </MiniSection>
-                <MiniSection title="Ждут решения" icon="i-lucide-hourglass" :count="queue.length || undefined">
+                <MiniSection title="На согласовании" icon="i-lucide-hourglass" :count="queue.length || undefined">
                   <MiniPostRow v-for="p in queue" :key="p.id" :post="p" :img="img" :fmt="fmt" @open="open(p.id)" />
-                  <MiniRow v-if="!queue.length" icon="i-lucide-party-popper" tone="emerald" tile="lg" title="Всё согласовано" subtitle="Новые посты появятся здесь">
-                    <UButton label="Задача" color="neutral" variant="soft" class="h-10 rounded-full px-4" @click="goTab('task')" />
+                  <MiniRow v-if="!queue.length" icon="i-lucide-check-check" tone="emerald" tile="md" title="Всё согласовано">
+                    <UButton label="Новая задача" color="neutral" variant="soft" class="h-10 shrink-0 rounded-full px-4" @click="goTab('task')" />
                   </MiniRow>
                 </MiniSection>
                 <MiniSection v-if="soon.length" title="Скоро выйдут" icon="i-lucide-calendar-clock" :count="soon.length">
@@ -981,8 +1071,8 @@ onMounted(() => {
               </MiniSection>
               <div v-if="posts && !groups.length" class="rounded-card bg-elevated px-6 py-12 text-center">
                 <MiniIconTile icon="i-lucide-newspaper" tone="slate" size="md" class="mx-auto" />
-                <p class="mt-4 text-heading font-semibold text-highlighted">Здесь пока ничего нет</p>
-                <p class="text-meta text-muted">Напишите боту задачу</p>
+                <p class="mt-4 text-heading font-semibold text-highlighted">Постов пока нет</p>
+                <UButton label="Новая задача" color="neutral" variant="soft" class="mt-4 h-10 rounded-full px-4" @click="goTab('task')" />
               </div>
             </div>
 
@@ -992,16 +1082,15 @@ onMounted(() => {
                 <div v-else-if="!messages.length" class="px-6 py-10 text-center">
                   <MiniIconTile icon="i-lucide-bot" tone="brand" size="md" class="mx-auto" />
                   <p class="mt-4 text-heading font-semibold text-highlighted">Опишите задачу своими словами</p>
-                  <p class="text-meta text-muted">Пост, план на неделю, сценарий видео или вопрос о компании</p>
                 </div>
                 <div v-for="m in messages ?? []" :key="m.id" class="flex" :class="m.direction === 'in' ? 'justify-end' : 'justify-start'">
                   <div
-                    class="max-w-[85%] rounded-tile px-4 py-3 text-body"
+                    class="max-w-[85%] min-w-0 rounded-tile px-4 py-3 text-body"
                     :class="m.direction === 'in' ? 'rounded-br-md bg-petrol-900 text-white' : 'rounded-bl-md bg-elevated text-highlighted'"
                   >
-                    <p class="whitespace-pre-line">{{ m.text }}</p>
+                    <p class="whitespace-pre-line [overflow-wrap:anywhere]">{{ m.text }}</p>
                     <UButton
-                      v-if="m.post_id && m.direction === 'out'" label="Открыть карточку" trailing-icon="i-lucide-arrow-right" color="primary" variant="outline" block
+                      v-if="m.post_id && m.direction === 'out'" label="Открыть пост" trailing-icon="i-lucide-arrow-right" color="primary" variant="outline" block
                       class="mt-2 h-10 justify-between rounded-full bg-elevated ring-[1.5px] ring-petrol-200" @click="open(m.post_id)"
                     />
                   </div>
@@ -1011,7 +1100,7 @@ onMounted(() => {
                     <span class="flex gap-1">
                       <span v-for="i in 3" :key="i" class="size-2 animate-bounce rounded-full bg-primary" :style="{ animationDelay: `${i * 0.15}s` }" />
                     </span>
-                    <span class="text-meta text-muted">{{ waitingPhase }}…</span>
+                    <span class="text-meta text-muted">Готовлю ответ…</span>
                   </div>
                 </div>
                 <div ref="chatEnd" />
@@ -1021,11 +1110,11 @@ onMounted(() => {
                   <button type="button" class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-petrol-900 px-3.5 text-meta font-semibold text-white shadow-sm active:scale-95" @click="newOpen = true">
                     <UIcon name="i-lucide-pencil-line" class="size-4" />Написать самому
                   </button>
-                  <button v-for="q in QUICK" :key="q.label" type="button" class="inline-flex h-9 shrink-0 items-center rounded-full bg-elevated px-3.5 text-meta font-semibold shadow-sm active:scale-95" :disabled="waitingReply" @click="sendTask(q.text)">{{ q.label }}</button>
+                  <button v-for="q in QUICK" :key="q.label" type="button" class="inline-flex h-9 shrink-0 items-center rounded-full bg-elevated px-3.5 text-meta font-semibold shadow-sm active:scale-95 disabled:opacity-50" :disabled="waitingReply || sending" @click="sendTask(q.text)">{{ q.label }}</button>
                 </div>
                 <form class="flex items-end gap-2 rounded-card bg-elevated p-2 ps-4" @submit.prevent="sendTask()">
                   <UTextarea
-                    v-model="draft" :rows="1" autoresize :maxrows="5" variant="none" :placeholder="recording ? `Запись… ${recSeconds} с` : `Задача для ${me.tenant.name}…`" :disabled="recording"
+                    v-model="draft" :rows="1" autoresize :maxrows="5" variant="none" :placeholder="recording ? `Запись… ${recSeconds} с` : 'Опишите задачу…'" :disabled="recording" aria-label="Задача"
                     class="flex-1" :ui="{ base: 'px-0 py-2 text-body' }" @keydown.enter.exact.prevent="sendTask()"
                   />
                   <UButton
@@ -1033,7 +1122,7 @@ onMounted(() => {
                     class="size-10 justify-center rounded-full" :class="recording ? 'animate-pulse bg-error hover:bg-error' : 'bg-petrol-900 hover:bg-petrol-800'"
                     :aria-label="recording ? 'Остановить запись' : 'Записать голосом'" @click="toggleVoice"
                   />
-                  <UButton v-else type="submit" icon="i-lucide-arrow-up" class="size-10 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :disabled="draft.trim().length < 2" aria-label="Отправить" />
+                  <UButton v-else type="submit" icon="i-lucide-arrow-up" class="size-10 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="sending" :disabled="draft.trim().length < 2" aria-label="Отправить" />
                 </form>
               </div>
             </section>
@@ -1043,7 +1132,7 @@ onMounted(() => {
                 <UButton icon="i-lucide-chevron-left" color="neutral" variant="outline" class="size-10 justify-center rounded-full bg-elevated ring-0 shadow-sm" aria-label="Предыдущая неделя" @click="weekOffset--" />
                 <div class="text-center">
                   <p class="text-heading font-semibold text-highlighted">{{ weekLabel }}</p>
-                  <button v-if="weekOffset !== 0" type="button" class="text-meta font-semibold text-primary" @click="toToday">К сегодняшней неделе</button>
+                  <button v-if="weekOffset !== 0" type="button" class="text-meta font-semibold text-primary" @click="toToday">Текущая неделя</button>
                 </div>
                 <UButton icon="i-lucide-chevron-right" color="neutral" variant="outline" class="size-10 justify-center rounded-full bg-elevated ring-0 shadow-sm" aria-label="Следующая неделя" @click="weekOffset++" />
               </div>
@@ -1051,16 +1140,16 @@ onMounted(() => {
 
               <div v-if="ideas.length" class="flex items-center gap-3 rounded-card bg-elevated p-4 ps-5">
                 <UIcon name="i-lucide-lightbulb" class="size-5 shrink-0 text-warning" />
-                <p class="flex-1 text-body font-semibold text-highlighted">Идей ждут решения: {{ ideas.length }}</p>
-                <UButton label="Принять" size="sm" class="h-9 rounded-full bg-petrol-900 px-3.5 hover:bg-petrol-800" @click="acceptIdeas" />
+                <p class="flex-1 text-body font-semibold text-highlighted">{{ plural(ideas.length, 'новая идея', 'новые идеи', 'новых идей') }}</p>
+                <UButton label="Принять все" size="sm" class="h-9 shrink-0 rounded-full bg-petrol-900 px-3.5 hover:bg-petrol-800" :loading="busy === 'ideas'" :disabled="!!busy" @click="acceptIdeas" />
               </div>
 
               <div v-if="emptyDay" id="day-empty" class="scroll-mt-3 rounded-card bg-elevated p-5">
                 <MiniRow
                   :icon="emptyDay.published.length ? 'i-lucide-send' : 'i-lucide-calendar'" :tone="emptyDay.published.length ? 'emerald' : 'slate'" tile="md"
-                  :title="emptyDay.title" :subtitle="emptyDay.published.length ? `Вышло: ${emptyDay.published.map((p: any) => p.title || p.topic).join(', ')}` : emptyDay.past ? 'В этот день ничего не выходило' : 'На этот день ничего не запланировано'" :lines="0"
+                  :title="emptyDay.title" :subtitle="emptyDay.published.length ? `Вышло: ${emptyDay.published.map((p: any) => p.title || p.topic).join(', ')}` : emptyDay.past ? 'Публикаций не было' : 'Ничего не запланировано'" :lines="0"
                 >
-                  <UButton v-if="!emptyDay.past" label="Тема" icon="i-lucide-sparkles" class="h-10 rounded-full bg-petrol-900 px-4 hover:bg-petrol-800" @click="askBot(`Предложи тему поста на ${dayShort(emptyDay.key)} и подготовь его к 10:00`)" />
+                  <UButton v-if="!emptyDay.past" label="Предложить тему" class="h-10 shrink-0 rounded-full bg-petrol-900 px-4 hover:bg-petrol-800" :disabled="sending" @click="askBot(`Предложи тему поста на ${dayShort(emptyDay.key)} и подготовь его к 10:00`)" />
                 </MiniRow>
               </div>
 
@@ -1072,9 +1161,9 @@ onMounted(() => {
                     tile="lg" :lines="2" :title="i.topic" :subtitle="i.reason || i.rubric" :meta="`${PLAN_LINE[i.status]?.t} · ${i.time}`" :meta-class="PLAN_LINE[i.status]?.c"
                     class="cursor-pointer" :class="i.status === 'skipped' && 'opacity-45'" @click="idea = i"
                   >
-                    <div v-if="i.status === 'idea'" class="flex flex-col items-end gap-0.5">
-                      <UButton label="Принять" color="primary" variant="outline" class="h-10 rounded-full bg-elevated px-4 ring-[1.5px] ring-petrol-200" @click.stop="setPlan(i.id, 'accepted')" />
-                      <UButton label="Пропустить" color="neutral" variant="ghost" size="sm" class="h-7 px-2 text-caption text-muted" @click.stop="setPlan(i.id, 'skipped')" />
+                    <div v-if="i.status === 'idea'" class="flex shrink-0 flex-col items-end gap-0.5">
+                      <UButton label="Принять" color="primary" variant="outline" class="h-10 rounded-full bg-elevated px-4 ring-[1.5px] ring-petrol-200" :loading="busy === `set:${i.id}`" :disabled="!!busy" @click.stop="setPlan(i.id, 'accepted')" />
+                      <UButton label="Пропустить" color="neutral" variant="ghost" size="sm" class="h-7 px-2 text-caption text-muted" :disabled="!!busy" @click.stop="setPlan(i.id, 'skipped')" />
                     </div>
                     <UButton v-else-if="i.postId" icon="i-lucide-arrow-right" color="neutral" variant="soft" class="size-10 justify-center rounded-full" aria-label="Открыть пост" @click.stop="open(i.postId)" />
                     <UIcon v-else name="i-lucide-chevron-right" class="mx-1 size-5 text-dimmed" />
@@ -1082,8 +1171,8 @@ onMounted(() => {
                 </MiniSection>
               </section>
               <div v-if="plan && !planDays.length" class="rounded-card bg-elevated p-5">
-                <MiniRow icon="i-lucide-calendar-plus" tone="slate" tile="md" title="Неделя пустая" subtitle="Попросите бота составить план">
-                  <UButton label="Составить" icon="i-lucide-sparkles" class="h-10 rounded-full bg-petrol-900 px-4 hover:bg-petrol-800" @click="askBot('Составь контент-план на неделю')" />
+                <MiniRow icon="i-lucide-calendar-plus" tone="slate" tile="md" title="Неделя пустая" :lines="0">
+                  <UButton v-if="weekOffset >= 0" label="Составить план" class="h-10 shrink-0 rounded-full bg-petrol-900 px-4 hover:bg-petrol-800" :disabled="sending" @click="askBot(weekOffset ? `Составь контент-план на неделю ${weekLabel}` : 'Составь контент-план на неделю')" />
                 </MiniRow>
               </div>
             </div>
@@ -1133,17 +1222,17 @@ onMounted(() => {
 
                 <MiniSection v-if="perf" title="Охват" icon="i-lucide-eye">
                   <div class="grid grid-cols-3">
-                    <div><p class="text-stat font-bold text-highlighted">{{ perf.totals.views === null ? '—' : nf(perf.totals.views) }}</p><p class="mt-1 text-caption text-muted">просмотры</p></div>
-                    <div><p class="text-stat font-bold text-highlighted">{{ perf.totals.avgViews ?? '—' }}</p><p class="mt-1 text-caption text-muted">на пост</p></div>
-                    <div><p class="text-stat font-bold text-highlighted">{{ perf.totals.clicks }}</p><p class="mt-1 text-caption text-muted">переходы</p></div>
+                    <div><p class="text-stat font-bold text-highlighted">{{ num(perf.totals.views) }}</p><p class="mt-1 text-caption text-muted">просмотры</p></div>
+                    <div><p class="text-stat font-bold text-highlighted">{{ num(perf.totals.avgViews) }}</p><p class="mt-1 text-caption text-muted">на пост</p></div>
+                    <div><p class="text-stat font-bold text-highlighted">{{ num(perf.totals.clicks) }}</p><p class="mt-1 text-caption text-muted">переходы</p></div>
                   </div>
                   <div v-if="dash" class="grid grid-cols-3 border-t border-default pt-4">
                     <div><p class="text-heading font-bold text-highlighted">{{ pctText(dash.engagement.er) }}</p><p class="mt-1 text-caption text-muted">вовлечённость</p></div>
                     <div><p class="text-heading font-bold text-highlighted">{{ pctText(dash.engagement.ctr) }}</p><p class="mt-1 text-caption text-muted">кликабельность</p></div>
-                    <div><p class="text-heading font-bold text-highlighted">{{ dash.engagement.reactions ?? '—' }}</p><p class="mt-1 text-caption text-muted">реакции</p></div>
+                    <div><p class="text-heading font-bold text-highlighted">{{ num(dash.engagement.reactions) }}</p><p class="mt-1 text-caption text-muted">реакции</p></div>
                   </div>
                   <MiniRow v-for="b in bests" :key="b.label" :icon="b.icon" tone="brand" :title="b.value" :subtitle="b.label">
-                    <span class="text-body font-semibold tabular-nums text-highlighted">{{ b.views }}</span>
+                    <span class="flex shrink-0 items-center gap-1 text-body font-semibold tabular-nums text-highlighted" :aria-label="`${num(b.views)} просмотров в среднем`"><UIcon name="i-lucide-eye" class="size-4 text-muted" />{{ num(b.views) }}</span>
                   </MiniRow>
                 </MiniSection>
 
@@ -1159,13 +1248,13 @@ onMounted(() => {
                       </div>
                       <span class="flex shrink-0 flex-col items-end text-caption tabular-nums text-muted">
                         <span class="flex items-center gap-1 font-semibold text-highlighted"><UIcon name="i-lucide-eye" class="size-3.5" />{{ nf(p.views) }}</span>
-                        <span class="flex items-center gap-1"><UIcon name="i-lucide-mouse-pointer-click" class="size-3.5" />{{ p.clicks }}</span>
+                        <span class="flex items-center gap-1"><UIcon name="i-lucide-mouse-pointer-click" class="size-3.5" />{{ num(p.clicks) }}</span>
                       </span>
                     </div>
                   </button>
                 </MiniSection>
 
-                <MiniSection v-if="perf && (perf.byTemplate.length || perf.byRubric.length)" title="Что заходит" icon="i-lucide-flame">
+                <MiniSection v-if="perf && (perf.byTemplate.length || perf.byRubric.length)" title="Что работает" icon="i-lucide-flame">
                   <div class="grid grid-cols-3 gap-1 rounded-full bg-glass-100 p-1">
                     <button
                       v-for="(t, key) in FORMATS" :key="key" type="button"
@@ -1177,7 +1266,7 @@ onMounted(() => {
                     </button>
                   </div>
                   <MiniHBars v-if="formatItems.length" :items="formatItems" :unit="avgUnit" />
-                  <p v-else class="text-meta text-muted">Просмотры ещё собираются</p>
+                  <p v-else class="text-meta text-muted">Данных пока нет</p>
                 </MiniSection>
 
                 <MiniSection v-if="dash" title="Воронка" icon="i-lucide-filter">
@@ -1186,13 +1275,13 @@ onMounted(() => {
 
                 <MiniSection title="Согласование" icon="i-lucide-stamp">
                   <div class="grid grid-cols-3">
-                    <div><p class="text-stat font-bold text-success">{{ summary.approvals.approved }}</p><p class="mt-1 text-caption text-muted">одобрено</p></div>
-                    <div><p class="text-stat font-bold text-primary">{{ summary.approvals.changes }}</p><p class="mt-1 text-caption text-muted">на доработку</p></div>
-                    <div><p class="text-stat font-bold text-error">{{ summary.approvals.rejected }}</p><p class="mt-1 text-caption text-muted">отклонено</p></div>
+                    <div><p class="text-stat font-bold text-success">{{ num(summary.approvals.approved) }}</p><p class="mt-1 text-caption text-muted">одобрено</p></div>
+                    <div><p class="text-stat font-bold text-primary">{{ num(summary.approvals.changes) }}</p><p class="mt-1 text-caption text-muted">на доработку</p></div>
+                    <div><p class="text-stat font-bold text-error">{{ num(summary.approvals.rejected) }}</p><p class="mt-1 text-caption text-muted">отклонено</p></div>
                   </div>
                   <div v-for="a in dash?.approvers ?? []" :key="a.name" class="space-y-3 border-t border-default pt-4">
                     <div class="flex items-center gap-3">
-                      <MiniIconTile :text="a.name.slice(0, 1)" tone="sky" />
+                      <MiniIconTile :text="initials(a.name)" tone="sky" />
                       <div class="min-w-0 flex-1">
                         <p class="truncate text-heading font-semibold text-highlighted">{{ a.name }}</p>
                         <p class="text-meta text-muted">{{ a.avgSec ? `отвечает за ${mins(a.avgSec)}` : 'ещё не отвечал' }}<template v-if="a.pending"> · ждёт {{ a.pending }}</template></p>
@@ -1221,17 +1310,17 @@ onMounted(() => {
 
                 <MiniSection title="Работа AI" icon="i-lucide-cpu">
                   <div class="grid grid-cols-3">
-                    <div><p class="text-heading font-bold text-highlighted">{{ summary.usage.calls }}</p><p class="text-caption text-muted">обращений</p></div>
-                    <div><p class="text-heading font-bold text-highlighted">{{ Math.round((summary.usage.tokensIn + summary.usage.tokensOut) / 1000) }} тыс.</p><p class="text-caption text-muted">токенов</p></div>
-                    <div><p class="text-heading font-bold text-highlighted">${{ Number(summary.usage.cost).toFixed(2) }}</p><p class="text-caption text-muted">оценка</p></div>
+                    <div><p class="text-heading font-bold text-highlighted">{{ num(summary.usage.calls) }}</p><p class="mt-1 text-caption text-muted">обращений</p></div>
+                    <div><p class="text-heading font-bold text-highlighted">{{ nf(Math.round((summary.usage.tokensIn + summary.usage.tokensOut) / 1000)) }} тыс.</p><p class="mt-1 text-caption text-muted">токенов</p></div>
+                    <div><p class="text-heading font-bold text-highlighted">{{ usd(summary.usage.cost) }}</p><p class="mt-1 text-caption text-muted">расходы</p></div>
                   </div>
                   <MiniHBars v-if="aiItems.length" :items="aiItems" :unit="timesUnit" />
                 </MiniSection>
 
                 <MiniSection v-if="dash" title="База знаний" icon="i-lucide-library">
                   <div class="grid grid-cols-2">
-                    <div><p class="text-stat font-bold text-highlighted">{{ dash.kb.sources }}</p><p class="mt-1 text-caption text-muted">материалов</p></div>
-                    <div><p class="text-stat font-bold text-highlighted">{{ nf(dash.kb.chunks) }}</p><p class="mt-1 text-caption text-muted">фактов для постов</p></div>
+                    <div><p class="text-stat font-bold text-highlighted">{{ num(dash.kb.sources) }}</p><p class="mt-1 text-caption text-muted">источников</p></div>
+                    <div><p class="text-stat font-bold text-highlighted">{{ num(dash.kb.chunks) }}</p><p class="mt-1 text-caption text-muted">фрагментов</p></div>
                   </div>
                 </MiniSection>
               </template>
@@ -1249,7 +1338,7 @@ onMounted(() => {
               <UIcon :name="n.icon" class="size-6" />
             </button>
             <button
-              v-else type="button" :aria-label="n.label"
+              v-else type="button" :aria-label="n.label" :aria-current="tab === n.value ? 'page' : undefined"
               class="relative grid size-12 place-items-center rounded-nav transition active:scale-95"
               :class="tab === n.value ? 'bg-muted text-petrol-900' : 'text-muted'"
               @click="navTo(n.value)"
@@ -1264,11 +1353,10 @@ onMounted(() => {
           <template #body>
             <MiniSection title="Компания" icon="i-lucide-building-2">
               <button v-for="t in me.tenants" :key="t.id" type="button" class="block w-full text-left" @click="switchTenant(t.id)">
-                <MiniRow icon="i-lucide-factory" tone="brand" tile="md" :title="t.name" :meta="t.id === me.tenant.id ? 'Выбрана' : undefined" meta-class="text-primary">
-                  <UIcon :name="t.id === me.tenant.id ? 'i-lucide-circle-check' : 'i-lucide-circle'" class="size-6" :class="t.id === me.tenant.id ? 'text-primary' : 'text-dimmed'" />
+                <MiniRow icon="i-lucide-factory" tone="brand" tile="md" :title="t.name">
+                  <UIcon :name="t.id === me.tenant.id ? 'i-lucide-circle-check' : 'i-lucide-circle'" class="size-6 shrink-0" :class="t.id === me.tenant.id ? 'text-primary' : 'text-dimmed'" />
                 </MiniRow>
               </button>
-              <p class="text-caption text-muted">Данные компаний изолированы: посты, план и статистика другой компании не видны.</p>
             </MiniSection>
           </template>
         </UDrawer>
@@ -1277,10 +1365,7 @@ onMounted(() => {
           <template #content>
             <div class="p-3 pb-6">
               <div class="space-y-4 rounded-card bg-elevated p-5">
-                <div>
-                  <p class="text-title font-semibold text-highlighted">Что поменять?</p>
-                  <p class="text-meta text-muted">AI подготовит новую версию, её нужно будет одобрить заново</p>
-                </div>
+                <p class="text-title font-semibold text-highlighted">Что поменять?</p>
                 <div class="flex flex-wrap gap-2">
                   <button
                     v-for="c in CHIPS" :key="c" type="button" class="h-9 rounded-full px-3.5 text-meta font-semibold transition"
@@ -1290,7 +1375,7 @@ onMounted(() => {
                   </button>
                 </div>
                 <UTextarea v-model="comment" placeholder="Или напишите своими словами" :rows="3" autoresize variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
-                <UButton label="Отправить на доработку" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'c'" :disabled="comment.trim().length < 3" @click="sendRevision" />
+                <UButton label="Отправить на доработку" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'c'" :disabled="comment.trim().length < 3 || (!!busy && busy !== 'c')" @click="sendRevision" />
               </div>
             </div>
           </template>
@@ -1321,7 +1406,7 @@ onMounted(() => {
             <form class="p-3 pb-6" @submit.prevent="changeCard({ fields: { ...cardForm } }, 'card:fields')">
               <div class="space-y-3 rounded-card bg-elevated p-5">
                 <div>
-                  <p class="text-title font-semibold text-highlighted">Текст на карточке</p>
+                  <p class="text-title font-semibold text-highlighted">Надписи на карточке</p>
                   <p class="text-meta text-muted">{{ CARD_TEMPLATES[(card?.template ?? 'project') as CardTemplateId].name }}</p>
                 </div>
                 <div class="grid grid-cols-2 gap-x-3 gap-y-2.5">
@@ -1330,7 +1415,7 @@ onMounted(() => {
                     <UInput v-model="cardForm[f.key]" :maxlength="f.max" variant="soft" size="lg" class="w-full" :placeholder="f.optional ? 'необязательно' : ''" :ui="{ base: 'rounded-tile-sm bg-muted' }" />
                   </label>
                 </div>
-                <UButton type="submit" label="Обновить карточку" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'card:fields'" />
+                <UButton type="submit" label="Обновить карточку" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'card:fields'" :disabled="!!busy && busy !== 'card:fields'" />
               </div>
             </form>
           </template>
@@ -1340,14 +1425,17 @@ onMounted(() => {
             <form class="p-3 pb-6" @submit.prevent="saveTime()">
               <div class="space-y-4 rounded-card bg-elevated p-5">
                 <p class="text-title font-semibold text-highlighted">Время выхода</p>
-                <div class="flex flex-wrap gap-2">
-                  <button v-for="q in [{ l: 'Сегодня 18:00', d: 0, h: 18 }, { l: 'Завтра 10:00', d: 1, h: 10 }, { l: 'Завтра 18:00', d: 1, h: 18 }]" :key="q.l" type="button" class="h-9 rounded-full bg-muted px-3.5 text-meta font-semibold text-default" @click="quickTime(q.d, q.h)">
+                <div v-if="quickTimes.length" class="flex flex-wrap gap-2">
+                  <button
+                    v-for="q in quickTimes" :key="q.l" type="button" class="h-9 rounded-full px-3.5 text-meta font-semibold transition"
+                    :class="timeValue === q.v ? 'bg-petrol-900 text-white' : 'bg-muted text-default'" @click="timeValue = q.v"
+                  >
                     {{ q.l }}
                   </button>
                 </div>
-                <UInput v-model="timeValue" type="datetime-local" variant="soft" size="lg" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted' }" />
-                <UButton type="submit" label="Сохранить" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'time'" :disabled="!timeValue" />
-                <UButton label="Без времени — сразу после одобрения" color="neutral" variant="soft" size="lg" block class="h-11 justify-center rounded-full" :disabled="!!busy" @click="saveTime(true)" />
+                <UInput v-model="timeValue" type="datetime-local" :min="toTzInput(new Date())" variant="soft" size="lg" class="w-full" aria-label="Дата и время" :ui="{ base: 'rounded-tile-sm bg-muted' }" />
+                <UButton type="submit" label="Сохранить" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'time'" :disabled="!timeValue || (!!busy && busy !== 'time')" />
+                <UButton v-if="detail?.scheduled_at" label="Сразу после одобрения" color="neutral" variant="soft" size="lg" block class="h-11 justify-center rounded-full" :disabled="!!busy" @click="saveTime(true)" />
               </div>
             </form>
           </template>
@@ -1356,10 +1444,7 @@ onMounted(() => {
           <template #content>
             <div class="p-3 pb-6">
               <div class="space-y-4 rounded-card bg-elevated p-5">
-                <div>
-                  <p class="text-title font-semibold text-highlighted">Почему отклоняете?</p>
-                  <p class="text-meta text-muted">Пост не выйдет. Причину AI учтёт в следующих материалах</p>
-                </div>
+                <p class="text-title font-semibold text-highlighted">Почему отклоняете?</p>
                 <div class="flex flex-wrap gap-2">
                   <button
                     v-for="c in REJECT_CHIPS" :key="c" type="button" class="h-9 rounded-full px-3.5 text-meta font-semibold transition"
@@ -1369,7 +1454,7 @@ onMounted(() => {
                   </button>
                 </div>
                 <UTextarea v-model="rejectReason" placeholder="Или своими словами (необязательно)" :rows="2" autoresize variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
-                <UButton label="Отклонить пост" color="error" size="lg" block class="h-12 justify-center rounded-full" :loading="busy === 'r'" @click="decide('r')" />
+                <UButton label="Отклонить пост" color="error" size="lg" block class="h-12 justify-center rounded-full" :loading="busy === 'r'" :disabled="!!busy && busy !== 'r'" @click="decide('r')" />
               </div>
             </div>
           </template>
@@ -1379,18 +1464,15 @@ onMounted(() => {
           <template #content>
             <form class="p-3 pb-6" @submit.prevent="saveEdit">
               <div class="space-y-3 rounded-card bg-elevated p-5">
-                <div>
-                  <p class="text-title font-semibold text-highlighted">Текст поста</p>
-                  <p class="text-meta text-muted">Правите сами, без AI. Карточка обновится по тексту, пост снова уйдёт на согласование</p>
-                </div>
-                <UInput v-model="editForm.title" placeholder="Заголовок" size="lg" maxlength="90" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
+                <p class="text-title font-semibold text-highlighted">Текст поста</p>
+                <UInput v-model="editForm.title" placeholder="Заголовок" aria-label="Заголовок" size="lg" maxlength="90" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
                 <div v-if="isRich" class="-mx-1 flex gap-1.5 overflow-x-auto px-1 [scrollbar-width:none]">
                   <button v-for="t in MD_TOOLS" :key="t.label" type="button" class="flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 text-meta font-semibold text-toned" @mousedown.prevent @click="insertMd(t)">
                     <UIcon :name="t.icon" class="size-3.5" />{{ t.label }}
                   </button>
                 </div>
-                <UTextarea ref="editTa" v-model="editForm.text" :rows="8" autoresize :maxrows="16" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
-                <UButton type="submit" label="Сохранить" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'edit'" :disabled="editForm.text.trim().length < 10" />
+                <UTextarea ref="editTa" v-model="editForm.text" aria-label="Текст" :rows="8" autoresize :maxrows="16" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
+                <UButton type="submit" label="Отправить на согласование" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'edit'" :disabled="editForm.text.trim().length < 10 || (!!busy && busy !== 'edit')" />
               </div>
             </form>
           </template>
@@ -1400,19 +1482,18 @@ onMounted(() => {
           <template #content>
             <form class="p-3 pb-6" @submit.prevent="createOwn">
               <div class="space-y-3 rounded-card bg-elevated p-5">
-                <div>
-                  <p class="text-title font-semibold text-highlighted">Свой пост</p>
-                  <p class="text-meta text-muted">Пишете сами. Карточку соберу по тексту — или приложите готовую картинку</p>
+                <p class="text-title font-semibold text-highlighted">Свой пост</p>
+                <UInput v-model="newForm.title" placeholder="Заголовок" aria-label="Заголовок" size="lg" maxlength="90" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
+                <UTextarea v-model="newForm.text" placeholder="Текст поста" aria-label="Текст поста" :rows="6" autoresize :maxrows="14" maxlength="4000" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
+                <div class="flex items-center gap-2 rounded-tile-sm bg-muted pe-2">
+                  <button type="button" class="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left" @click="newFileInput?.click()">
+                    <UIcon :name="newFile ? 'i-lucide-image' : 'i-lucide-image-plus'" class="size-5 shrink-0 text-primary" />
+                    <span class="flex-1 truncate text-body" :class="newFile ? 'text-highlighted' : 'text-muted'">{{ newFile ? newFile.name : 'Готовая картинка (необязательно)' }}</span>
+                  </button>
+                  <UButton v-if="newFile" icon="i-lucide-x" color="neutral" variant="ghost" size="sm" class="size-8 justify-center rounded-full" aria-label="Убрать картинку" @click="newFile = null; newFileInput && (newFileInput.value = '')" />
                 </div>
-                <UInput v-model="newForm.title" placeholder="Заголовок" size="lg" maxlength="90" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
-                <UTextarea v-model="newForm.text" placeholder="Текст поста" :rows="6" autoresize :maxrows="14" variant="soft" class="w-full" :ui="{ base: 'rounded-tile-sm bg-muted text-body' }" />
-                <button type="button" class="flex w-full items-center gap-3 rounded-tile-sm bg-muted px-4 py-3 text-left" @click="newFileInput?.click()">
-                  <UIcon :name="newFile ? 'i-lucide-image' : 'i-lucide-image-plus'" class="size-5 text-primary" />
-                  <span class="flex-1 truncate text-body" :class="newFile ? 'text-highlighted' : 'text-muted'">{{ newFile ? newFile.name : 'Готовая картинка (необязательно)' }}</span>
-                  <UIcon v-if="newFile" name="i-lucide-x" class="size-4 text-muted" @click.stop="newFile = null" />
-                </button>
                 <input ref="newFileInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" @change="e => newFile = (e.target as HTMLInputElement).files?.[0] ?? null">
-                <UButton type="submit" label="На согласование" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'new'" :disabled="newForm.title.trim().length < 3 || newForm.text.trim().length < 10" />
+                <UButton type="submit" label="Отправить на согласование" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === 'new'" :disabled="newForm.title.trim().length < 3 || newForm.text.trim().length < 10 || (!!busy && busy !== 'new')" />
               </div>
             </form>
           </template>
@@ -1424,18 +1505,17 @@ onMounted(() => {
               <div class="space-y-4 rounded-card bg-elevated p-5">
                 <div>
                   <p class="text-meta font-semibold" :class="PLAN_LINE[idea.status]?.c">{{ PLAN_LINE[idea.status]?.t }} · {{ dayShort(idea.date) }}, {{ idea.time }}<template v-if="idea.rubric"> · {{ idea.rubric }}</template></p>
-                  <p class="mt-1 text-title font-semibold text-highlighted">{{ idea.topic }}</p>
-                  <p v-if="idea.reason" class="mt-2 text-body text-toned">{{ idea.reason }}</p>
+                  <p class="mt-1 text-title font-semibold text-highlighted [overflow-wrap:anywhere]">{{ idea.topic }}</p>
+                  <p v-if="idea.reason" class="mt-2 text-body text-toned [overflow-wrap:anywhere]">{{ idea.reason }}</p>
                 </div>
-                <p class="rounded-tile-sm bg-muted px-4 py-3 text-meta text-toned">{{ PLAN_LINE[idea.status]?.about }}</p>
                 <UButton v-if="idea.postId" label="Открыть пост" icon="i-lucide-arrow-right" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" @click="open(idea.postId); idea = null" />
                 <template v-else>
-                  <UButton label="Подготовить пост сейчас" icon="i-lucide-sparkles" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === `plan:${idea.id}`" @click="draftNow(idea)" />
+                  <UButton label="Подготовить пост сейчас" icon="i-lucide-sparkles" size="lg" block class="h-12 justify-center rounded-full bg-petrol-900 hover:bg-petrol-800" :loading="busy === `plan:${idea.id}`" :disabled="!!busy && busy !== `plan:${idea.id}`" @click="draftNow(idea)" />
                   <div v-if="idea.status === 'idea'" class="grid grid-cols-2 gap-2">
-                    <UButton label="Принять" color="primary" variant="outline" size="lg" class="h-11 justify-center rounded-full ring-[1.5px] ring-petrol-200" @click="setPlan(idea.id, 'accepted')" />
-                    <UButton label="Пропустить" color="neutral" variant="soft" size="lg" class="h-11 justify-center rounded-full" @click="setPlan(idea.id, 'skipped'); idea = null" />
+                    <UButton label="Принять" color="primary" variant="outline" size="lg" class="h-11 justify-center rounded-full ring-[1.5px] ring-petrol-200" :loading="busy === `set:${idea.id}`" :disabled="!!busy" @click="setPlan(idea.id, 'accepted')" />
+                    <UButton label="Пропустить" color="neutral" variant="soft" size="lg" class="h-11 justify-center rounded-full" :disabled="!!busy" @click="setPlan(idea.id, 'skipped')" />
                   </div>
-                  <UButton v-else-if="idea.status === 'skipped'" label="Вернуть в план" color="primary" variant="outline" size="lg" block class="h-11 justify-center rounded-full" @click="setPlan(idea.id, 'accepted')" />
+                  <UButton v-else-if="idea.status === 'skipped'" label="Вернуть в план" color="primary" variant="outline" size="lg" block class="h-11 justify-center rounded-full" :loading="busy === `set:${idea.id}`" :disabled="!!busy" @click="setPlan(idea.id, 'accepted')" />
                 </template>
               </div>
             </div>
@@ -1453,7 +1533,7 @@ onMounted(() => {
                 <div class="space-y-2">
                   <p class="flex items-center gap-2 text-meta font-semibold text-toned"><UIcon name="i-lucide-book-open" class="size-4 text-primary" />{{ fact.title }}</p>
                   <USkeleton v-if="fact.loading" class="h-24 rounded-tile-sm" />
-                  <blockquote v-else class="max-h-72 overflow-y-auto whitespace-pre-line rounded-tile-sm border-l-4 border-primary bg-muted px-4 py-3 text-body text-highlighted">{{ fact.text }}</blockquote>
+                  <blockquote v-else class="max-h-72 overflow-y-auto whitespace-pre-line [overflow-wrap:anywhere] rounded-tile-sm border-l-4 border-primary bg-muted px-4 py-3 text-body text-highlighted">{{ fact.text }}</blockquote>
                 </div>
                 <UButton v-if="fact.url" label="Открыть источник" icon="i-lucide-external-link" color="neutral" variant="soft" size="lg" block class="h-11 justify-center rounded-full" @click="openChannel(fact.url)" />
               </div>

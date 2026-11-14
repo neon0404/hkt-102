@@ -46,6 +46,10 @@ export async function completeJob(id: string, result: Record<string, unknown> = 
     .where(eq(schema.jobRuns.id, id))
 }
 
+export async function touchJob(id: string) {
+  await db.execute(sql`UPDATE job_runs SET locked_at = now() WHERE id = ${id} AND status = 'running'`)
+}
+
 const RETRY_DELAYS_SEC = [30, 120, 600]
 
 export async function failJob(job: JobRow, error: string, retryable: boolean): Promise<'retry' | 'failed'> {

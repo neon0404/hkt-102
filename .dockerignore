@@ -9,3 +9,11 @@ docs/PRD.md
 *.log
 .claude
 speech-server
+tests
+docs
+scripts
+Dockerfile
+.dockerignore
+docker-compose*.yml
+Caddyfile
+.env.*

@@ -10,11 +10,12 @@ const photos = computed(() => props.version.gallery?.photos ?? [])
 const FORMATS = [{ label: 'Журнальный', value: 'rich', icon: 'i-lucide-newspaper' }, { label: 'Обычный', value: 'classic', icon: 'i-lucide-image' }]
 
 async function change(body: any, what: string) {
+  if (busy.value) return
   busy.value = what
   try {
     const res = await api(`/tenants/${props.tenantId}/posts/${props.post.id}/layout`, { method: 'POST', body })
     emit('updated', res.post)
-    if (res.new_version) toast.add({ title: 'Создана новая версия — отправлена на согласование', color: 'info' })
+    if (res.new_version) toast.add({ title: 'Новая версия отправлена на согласование', color: 'info' })
   }
   catch {}
   finally { busy.value = '' }
@@ -52,7 +53,7 @@ async function upload(e: Event) {
     <div class="flex flex-wrap gap-2">
       <div v-if="version.image_url" class="relative">
         <img :src="version.image_url" alt="" class="size-20 rounded-md object-cover ring-1 ring-default">
-        <span class="absolute inset-x-1 bottom-1 rounded bg-black/60 text-center text-[10px] font-medium text-white">обложка</span>
+        <span class="absolute inset-x-1 bottom-1 rounded bg-black/60 text-center text-[10px] font-medium text-white">Обложка</span>
       </div>
       <div v-for="p in photos" :key="p.id" class="group relative">
         <img :src="p.url" alt="" class="size-20 rounded-md object-cover ring-1 ring-default">

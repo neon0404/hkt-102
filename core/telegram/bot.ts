@@ -7,10 +7,13 @@ import { sendCommentReply, statusText } from '../jobs/handlers'
 import { enqueue } from '../jobs/queue'
 import { acceptMemberText } from '../services/inbox'
 import { decideApproval, getTenant, sayToMember, submitChangeRequest } from '../services/posts'
-import { esc, tgClient } from './api'
+import { isUuid } from '../crypto'
+import { tgClient } from './api'
 import { mdEsc, sendRich } from './rich'
 
 type Member = typeof schema.tenantMembers.$inferSelect
+
+const NO_ACCESS = 'Доступа нет. Попросите у оператора ссылку-приглашение.'
 
 export async function resolveMember(tgUserId: number): Promise<{ member: Member, all: Member[] } | null> {
   const all = await db.select().from(schema.tenantMembers)
@@ -27,30 +30,30 @@ async function setActiveTenant(tgUserId: number, tenantId: string) {
     .onConflictDoUpdate({ target: schema.tgSessions.tgUserId, set: { activeTenantId: tenantId, updatedAt: new Date() } })
 }
 
-const HELP = `## 👋 Я AI-маркетолог
-Пишите или говорите **голосом** обычным языком.
+const HELP = `## Я AI-маркетолог вашей компании
+Пишите или говорите **голосом** обычными словами.
 
-### Что умею
-| Скажите | Что будет |
+### Что можно попросить
+| Скажите | Что получите |
 |:---|:---|
 | «Подготовь пост о новом продукте на завтра в 10:00» | пост с карточкой на согласование |
-| «Сделай короткий ролик о том, как делают стекло» | вертикальное видео с озвучкой |
-| «Составь контент-план на неделю» | темы по дням, приму одной кнопкой |
-| «Что с последним постом?» | статусы материалов |
+| «Сделай короткий ролик о нашем производстве» | вертикальное видео с озвучкой |
+| «Составь контент-план на неделю» | темы по дням, план принимается одной кнопкой |
+| «Что с последним постом?» | статусы постов |
 | «Покажи отчёт» | цифры, выводы и что делать дальше |
 
-### Решения — кнопкой или словами
+### Решение по посту — кнопкой или словами
 - ✅ «Одобряю», «Публикуй завтра в 9»
 - ✏️ «Сделай короче и добавь призыв»
-- ✖️ «Отклоняю»
+- ⛔ «Отклоняю»
 
-> Публикация выходит **только после вашего согласования**.
+> В канал выходит **только то, что вы одобрили**.
 
-/status — последние материалы · /company — сменить компанию · /cancel — отменить ввод`
+/status — последние посты · /company — сменить компанию · /cancel — отменить ввод`
 
 async function redeemInvite(ctx: Context, code: string) {
   const from = ctx.from!
-  const invalid = 'Ссылка недействительна, запросите новую у оператора.'
+  const invalid = 'Ссылка недействительна или уже использована. Попросите у оператора новую.'
   if (!/^[\w-]{16,64}$/.test(code)) return ctx.reply(invalid)
   const [invite] = await db.select().from(schema.invites)
     .where(and(eq(schema.invites.code, code), isNull(schema.invites.usedAt), gt(schema.invites.expiresAt, new Date())))
@@ -125,7 +128,7 @@ export function createBot(): Bot {
     const code = ctx.match?.trim()
     if (code) return redeemInvite(ctx, code)
     const r = await resolveMember(ctx.from!.id)
-    if (!r) return ctx.reply('Здравствуйте! Чтобы начать, откройте ссылку-приглашение от оператора сервиса.')
+    if (!r) return ctx.reply('Здравствуйте! Чтобы начать, откройте ссылку-приглашение от оператора.')
     const tenant = await getTenant(r.member.tenantId)
     return sendRich(ctx.chat.id, `Вы работаете с компанией «**${mdEsc(tenant.name)}**».\n\n${HELP}`)
   })
@@ -140,14 +143,14 @@ export function createBot(): Bot {
 
   bot.command('status', async (ctx) => {
     const r = await resolveMember(ctx.from!.id)
-    if (!r) return ctx.reply('Доступа нет. Запросите ссылку-приглашение у оператора.')
+    if (!r) return ctx.reply(NO_ACCESS)
     const tenant = await getTenant(r.member.tenantId)
     return sendRich(ctx.chat.id, await statusText(r.member.tenantId, tenant.timezone))
   })
 
   bot.command('company', async (ctx) => {
     const r = await resolveMember(ctx.from!.id)
-    if (!r) return ctx.reply('Доступа нет. Запросите ссылку-приглашение у оператора.')
+    if (!r) return ctx.reply(NO_ACCESS)
     if (r.all.length < 2) {
       const tenant = await getTenant(r.member.tenantId)
       return ctx.reply(`Вы подключены к одной компании: «${tenant.name}».`)
@@ -179,19 +182,19 @@ export function createBot(): Bot {
         await sayToMember(who, 'Что изменить? Напишите комментарий одним сообщением (/cancel — отменить).', { postId: res.postId })
       }
       else if (res.action === 'approved') {
-        await sayToMember(who, 'Одобрено. Опубликую в назначенное время и пришлю ссылку.', { postId: res.postId })
+        await sayToMember(who, 'Пост одобрен. Опубликую в назначенное время и пришлю ссылку.', { postId: res.postId })
       }
       else if (res.action === 'approved_partial') {
         await sayToMember(who, 'Ваше одобрение учтено. Жду решения остальных согласующих.', { postId: res.postId })
       }
       else if (res.action === 'rejected') {
-        await sayToMember(who, 'Отклонено. Этот материал опубликован не будет.', { postId: res.postId })
+        await sayToMember(who, 'Пост отклонён и в канал не выйдет.', { postId: res.postId })
       }
       return
     }
 
     const r = await resolveMember(tgUserId)
-    if (!r) return answer('Доступа нет', true)
+    if (!r) return answer(NO_ACCESS, true)
 
     if (data.startsWith('co:')) {
       const tenantId = data.slice(3)
@@ -205,13 +208,16 @@ export function createBot(): Bot {
 
     if (data.startsWith('pl:')) {
       const [, batchId, action] = data.split(':')
-      const items = await db.select().from(schema.planItems).where(eq(schema.planItems.batchId, batchId!))
+      if (!isUuid(batchId)) return answer('План не найден', true)
+      const items = await db.select().from(schema.planItems).where(eq(schema.planItems.batchId, batchId))
       const member = r.all.find(m => m.tenantId === items[0]?.tenantId)
       if (!items.length || !member) return answer('План не найден', true)
       if (items.some(i => i.status !== 'idea')) return answer('По этому плану решение уже принято', true)
       const status = action === 'a' ? 'accepted' : 'skipped'
-      await db.update(schema.planItems).set({ status }).where(and(eq(schema.planItems.tenantId, member.tenantId), eq(schema.planItems.batchId, batchId!)))
-      await audit(member.tenantId, 'member', member.id, `plan.${status}`, 'plan', batchId!, { items: items.length })
+      const changed = await db.update(schema.planItems).set({ status })
+        .where(and(eq(schema.planItems.tenantId, member.tenantId), eq(schema.planItems.batchId, batchId), eq(schema.planItems.status, 'idea'))).returning({ id: schema.planItems.id })
+      if (!changed.length) return answer('По этому плану решение уже принято', true)
+      await audit(member.tenantId, 'member', member.id, `plan.${status}`, 'plan', batchId, { items: items.length })
       await answer()
       await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard().text(action === 'a' ? '✅ План принят' : '✖️ План отклонён', 'noop') }).catch(() => {})
       return sayToMember(member, action === 'a'
@@ -221,7 +227,8 @@ export function createBot(): Bot {
 
     if (data.startsWith('cm:')) {
       const [, commentId, action] = data.split(':')
-      const [comment] = await db.select().from(schema.comments).where(eq(schema.comments.id, commentId!))
+      if (!isUuid(commentId)) return answer('Комментарий не найден', true)
+      const [comment] = await db.select().from(schema.comments).where(eq(schema.comments.id, commentId))
       const member = r.all.find(m => m.tenantId === comment?.tenantId && m.roles.includes('approver'))
       if (!comment || !member) return answer('Нет доступа', true)
       if (action === 's') {
@@ -244,7 +251,7 @@ export function createBot(): Bot {
     const r = await resolveMember(ctx.from.id)
     if (!r) {
       await audit(null, 'member', String(ctx.from.id), 'access.denied', 'bot', null, { reason: 'not_a_member' })
-      return ctx.reply('Доступа нет. Запросите ссылку-приглашение у оператора сервиса.')
+      return ctx.reply(NO_ACCESS)
     }
     const { member } = r
     const text = ctx.message.text.trim().slice(0, 4000)
@@ -253,14 +260,13 @@ export function createBot(): Bot {
       member.tgChatId = ctx.chat.id
     }
 
-    const r2 = await acceptMemberText(member, text, { tgMessageId: ctx.message.message_id, dedupKey: `msg:${ctx.update.update_id}` })
-    void r2
+    await acceptMemberText(member, text, { tgMessageId: ctx.message.message_id, dedupKey: `msg:${ctx.update.update_id}` })
   })
 
   bot.on(['message:voice', 'message:audio', 'message:video_note'], async (ctx) => {
     if (ctx.chat.type !== 'private') return
     const r = await resolveMember(ctx.from.id)
-    if (!r) return ctx.reply('Доступа нет. Запросите ссылку-приглашение у оператора сервиса.')
+    if (!r) return ctx.reply(NO_ACCESS)
     const file = ctx.message.voice ?? ctx.message.audio ?? ctx.message.video_note
     if (!file) return
     if ((file.duration ?? 0) > 120) return ctx.reply('Голосовое длиннее двух минут — сократите, пожалуйста, или напишите текстом.')
@@ -273,7 +279,7 @@ export function createBot(): Bot {
   })
 
   bot.on('message', async (ctx) => {
-    if (ctx.chat.type === 'private') await ctx.reply('Принимаю текст и голосовые. Опишите задачу словами.')
+    if (ctx.chat.type === 'private') await ctx.reply('Я понимаю текст и голосовые. Опишите задачу словами.')
   })
 
   bot.catch((err) => {

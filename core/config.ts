@@ -48,4 +48,8 @@ export const config = {
   outboundProxy: env('OUTBOUND_PROXY'),
 }
 
+if (process.env.NODE_ENV === 'production' && (config.secretKey === 'dev-secret-change-me' || config.credentialsKey === 'dev-credentials-key-change-me')) {
+  console.error('[config] SECRET_KEY или CREDENTIALS_ENCRYPTION_KEY не заданы: сессии и ключи каналов защищены ключом по умолчанию')
+}
+
 export type AppConfig = typeof config

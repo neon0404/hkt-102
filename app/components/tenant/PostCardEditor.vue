@@ -28,13 +28,14 @@ const tpl = computed(() => CARD_TEMPLATES[template.value])
 const templates = Object.values(CARD_TEMPLATES)
 
 async function send(body: any, what: string) {
+  if (busy.value) return
   busy.value = what
   try {
     const res = await api<any>(`/tenants/${props.tenantId}/posts/${props.post.id}/card`, { method: 'POST', body })
     overflow.value = res.overflow ?? []
     stamp.value = Date.now()
     emit('updated', res.post)
-    if (res.new_version) toast.add({ title: 'Создана новая версия', description: 'Пост снова на согласовании', color: 'info' })
+    if (res.new_version) toast.add({ title: 'Новая версия отправлена на согласование', color: 'info' })
   }
   catch {}
   finally { busy.value = '' }
@@ -62,6 +63,7 @@ async function upload(e: Event) {
       <button
         v-for="t in templates" :key="t.id" type="button"
         class="group relative w-[5.5rem] shrink-0 text-left disabled:cursor-wait"
+        :aria-pressed="t.id === template"
         :disabled="!!busy"
         @click="pickTemplate(t.id)"
       >

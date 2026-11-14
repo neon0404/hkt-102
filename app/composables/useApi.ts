@@ -21,9 +21,46 @@ export function useApi() {
   return { api }
 }
 
+const yearIn = (d: Date, tz?: string) => new Intl.DateTimeFormat('ru-RU', { year: 'numeric', timeZone: tz }).format(d)
+
 export const fmtDate = (v: string | Date | null | undefined, tz?: string) => {
   if (!v) return '—'
-  return new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(v))
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return '—'
+  const withYear = yearIn(d, tz) !== yearIn(new Date(), tz)
+  return new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit', year: withYear ? 'numeric' : undefined, hour: '2-digit', minute: '2-digit', timeZone: tz }).format(d)
+}
+
+function tzOffsetMs(d: Date, tz?: string) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(d).map(x => [x.type, x.value]))
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second))
+  return asUtc - Math.floor(d.getTime() / 1000) * 1000
+}
+
+export const toZonedInput = (v: string | Date | null | undefined, tz?: string) => {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return ''
+  return new Date(d.getTime() + tzOffsetMs(d, tz)).toISOString().slice(0, 16)
+}
+
+export const fromZonedInput = (v: string, tz?: string) => {
+  if (!v) return null
+  const guess = Date.parse(`${v}:00Z`)
+  if (Number.isNaN(guess)) return null
+  const first = guess - tzOffsetMs(new Date(guess), tz)
+  return new Date(guess - tzOffsetMs(new Date(first), tz)).toISOString()
+}
+
+export const plural = (n: number, forms: [string, string, string]) => {
+  const a = Math.abs(n) % 100
+  const b = a % 10
+  if (a > 10 && a < 20) return forms[2]
+  if (b > 1 && b < 5) return forms[1]
+  if (b === 1) return forms[0]
+  return forms[2]
 }
 
 export const POST_STATUS: Record<string, { label: string, color: any }> = {
@@ -37,6 +74,13 @@ export const POST_STATUS: Record<string, { label: string, color: any }> = {
   rejected: { label: 'Отклонён', color: 'error' },
 }
 
+export const POST_ORIGIN: Record<string, string> = {
+  user_request: 'По запросу',
+  schedule: 'Автономно',
+  plan: 'По плану',
+  operator: 'Оператор',
+}
+
 export const PROVIDER_NAMES: Record<string, string> = {
   chatgpt_account: 'Аккаунт ChatGPT',
   api: 'API-ключ',
@@ -44,4 +88,4 @@ export const PROVIDER_NAMES: Record<string, string> = {
 }
 
 export const statusOf = (p: any): { label: string, color: any } =>
-  p?.revising ? { label: 'На доработке', color: 'info' } : POST_STATUS[p?.status] ?? { label: p?.status ?? '—', color: 'neutral' }
+  p?.revising ? { label: 'На доработке', color: 'info' } : POST_STATUS[p?.status] ?? { label: 'Неизвестно', color: 'neutral' }

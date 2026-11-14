@@ -21,11 +21,12 @@ const options = computed(() => [
 const dirty = computed(() => selected.value !== (tenant.value.settings.provider ?? 'default'))
 
 async function save() {
+  if (saving.value || !dirty.value) return
   saving.value = true
   try {
     await api(`/tenants/${props.tenantId}`, { method: 'PATCH', body: { settings: { provider: selected.value === 'default' ? null : selected.value } } })
     await reloadTenant()
-    toast.add({ title: 'Модель изменена', color: 'success' })
+    toast.add({ title: 'Модель применена', color: 'success' })
   }
   catch {}
   finally { saving.value = false }
@@ -44,7 +45,7 @@ async function test(name: string) {
     <div v-if="data" class="space-y-6">
       <UCard>
         <div class="flex flex-wrap items-end gap-3">
-          <UFormField label="Модель компании" class="min-w-72 flex-1">
+          <UFormField label="Модель компании" class="min-w-0 flex-1 sm:min-w-72">
             <USelect v-model="selected" :items="options" class="w-full" />
           </UFormField>
           <UButton :loading="saving" :disabled="!dirty" icon="i-lucide-check" @click="save">Применить</UButton>
@@ -60,7 +61,7 @@ async function test(name: string) {
           <div class="flex items-center gap-3">
             <span class="flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"><UIcon :name="ICON[p.name] ?? 'i-lucide-bot'" class="size-5" /></span>
             <div class="min-w-0 flex-1">
-              <h3 class="font-semibold text-highlighted">{{ PROVIDER_NAMES[p.name] }}</h3>
+              <h3 class="font-semibold text-highlighted">{{ PROVIDER_NAMES[p.name] ?? p.label }}</h3>
               <p class="truncate text-xs text-muted">{{ p.model }}</p>
             </div>
             <UBadge v-if="tenant.provider_effective === p.name" color="primary" variant="subtle">Активна</UBadge>
@@ -68,7 +69,7 @@ async function test(name: string) {
           </div>
 
           <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-            <dt class="text-muted">Статус</dt><dd class="truncate font-mono text-xs leading-5 text-toned">{{ p.status }}</dd>
+            <dt class="text-muted">Статус</dt><dd class="min-w-0 break-words text-toned">{{ p.status }}</dd>
             <dt class="text-muted">Оплата</dt><dd class="text-toned">{{ p.billing }}</dd>
           </dl>
 
@@ -76,10 +77,10 @@ async function test(name: string) {
 
           <div v-if="results[p.name]" class="rounded-lg p-3 text-sm" :class="results[p.name].ok ? 'bg-success/10' : 'bg-error/10'">
             <template v-if="results[p.name].ok">
-              <p class="font-medium text-highlighted">«{{ results[p.name].answer }}»</p>
+              <p class="break-words font-medium text-highlighted">«{{ results[p.name].answer }}»</p>
               <p class="mt-1 text-xs text-muted">{{ (results[p.name].duration_ms / 1000).toFixed(1) }} с · {{ results[p.name].input_tokens }} + {{ results[p.name].output_tokens }} токенов</p>
             </template>
-            <p v-else class="text-error">{{ results[p.name].error }}</p>
+            <p v-else class="break-words text-error">{{ results[p.name].error }}</p>
           </div>
         </UCard>
       </div>

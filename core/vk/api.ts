@@ -7,24 +7,35 @@ export class VkError extends Error {
 
 const TEMPORARY = new Set([6, 9, 10, 29])
 
+const RETRY = new Set([6, 9, 10])
+
 export async function vkCall<T = any>(method: string, params: Record<string, string | number | undefined>, token: string, timeoutMs = 20_000): Promise<T> {
-  const body = new URLSearchParams()
-  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') body.set(k, String(v))
-  body.set('access_token', token)
-  body.set('v', VERSION)
-  const res = await fetch(`${API}/${method}`, { method: 'POST', body, signal: AbortSignal.timeout(timeoutMs) })
-  const json = await res.json() as { response?: T, error?: { error_code: number, error_msg: string } }
-  if (json.error) throw new VkError(json.error.error_code, humanVkError(json.error.error_code, json.error.error_msg), TEMPORARY.has(json.error.error_code))
-  return json.response as T
+  for (let attempt = 0; ; attempt++) {
+    const body = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') body.set(k, String(v))
+    body.set('access_token', token)
+    body.set('v', VERSION)
+    const res = await fetch(`${API}/${method}`, { method: 'POST', body, signal: AbortSignal.timeout(timeoutMs) })
+    const json = await res.json() as { response?: T, error?: { error_code: number, error_msg: string } }
+    if (!json.error) return json.response as T
+    const { error_code: code, error_msg: msg } = json.error
+    console.warn(`[vk] ${method}: ${code} ${msg}`)
+    if (RETRY.has(code) && attempt < 3) {
+      await new Promise(r => setTimeout(r, 700 * (attempt + 1)))
+      continue
+    }
+    throw new VkError(code, humanVkError(code, msg, method), TEMPORARY.has(code))
+  }
 }
 
-export function humanVkError(code: number, msg: string): string {
+export function humanVkError(code: number, msg: string, method?: string): string {
+  if (TEMPORARY.has(code)) return 'ВКонтакте временно не отвечает, попробуйте через минуту'
   if (code === 5) return 'ВКонтакте не принял ключ доступа: он неверный, просрочен или отозван'
+  if (code === 1051) return `ВКонтакте не даёт этот метод ключу входа VK ID (${method ?? 'запрос'}, код 1051): ${msg}`
   if (code === 15 || code === 7) return 'У ключа нет прав: нужен ключ администратора сообщества с правами wall, photos, groups, offline'
   if (code === 27) return 'Это ключ сообщества — для публикации на стену нужен ключ пользователя-администратора'
   if (code === 214) return 'Публикация на стене сообщества запрещена — откройте стену или дайте права администратора'
   if (code === 100) return `Неверный запрос к ВКонтакте: ${msg}`
-  if (TEMPORARY.has(code)) return 'ВКонтакте временно не отвечает, попробуйте позже'
   return `ВКонтакте: ${msg}`
 }
 
@@ -37,6 +48,27 @@ export function groupRef(input: string): string | null {
 }
 
 export interface VkGroup { id: number, name: string, screen_name: string, is_admin?: 0 | 1 | boolean, admin_level?: number }
+
+export async function findEditableGroup(ref: string, token: string): Promise<VkGroup | null> {
+  let group: VkGroup | null
+  try {
+    const res = await vkCall<{ items: VkGroup[] }>('groups.get', { filter: 'editor', extended: 1, fields: 'screen_name', count: 1000 }, token)
+    const key = ref.toLowerCase()
+    group = res.items.find(g => String(g.id) === key || g.screen_name?.toLowerCase() === key || `club${g.id}` === key || `public${g.id}` === key) ?? null
+  }
+  catch (e) {
+    if (!(e instanceof VkError) || e.code !== 1051) throw e
+    group = await getGroup(ref, token)
+    if (group.admin_level !== undefined && group.admin_level < 2 && (group.is_admin === 1 || group.is_admin === true)) throw new VkError(15, `Владелец ключа — модератор сообщества «${group.name}». Для публикации нужны права редактора или администратора.`)
+  }
+  if (!group) return null
+  try { await vkCall('photos.getWallUploadServer', { group_id: group.id }, token) }
+  catch (e) {
+    if (e instanceof VkError && [15, 7, 27, 203].includes(e.code)) throw new VkError(e.code, `Нет прав публиковать в сообществе «${group.name}»: ${e.message}`)
+    throw e
+  }
+  return group
+}
 
 export async function canPostToWall(group: VkGroup, token: string): Promise<string | null> {
   if ((group.is_admin === 1 || group.is_admin === true) && (group.admin_level === undefined || group.admin_level >= 2)) return null

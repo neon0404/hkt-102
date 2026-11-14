@@ -21,17 +21,27 @@ const day = (d: string) => {
   }
 }
 
+const busy = ref('')
 async function setStatus(item: any, status: string) {
-  await api(`/tenants/${props.tenantId}/plan-items/${item.id}`, { method: 'PATCH', body: { status } })
-  await reload(true)
+  if (busy.value) return
+  busy.value = `${item.id}:${status}`
+  try {
+    await api(`/tenants/${props.tenantId}/plan-items/${item.id}`, { method: 'PATCH', body: { status } })
+    await reload(true)
+  }
+  catch {}
+  finally { busy.value = '' }
 }
 </script>
 
 <template>
   <LoadState
     :loading="loading" :error="error" :empty="!data?.length" empty-icon="i-lucide-calendar-days"
-    empty-title="Плана нет" empty-text="Попросите бота «Составь контент-план на неделю»" @retry="reload()"
+    empty-title="Плана нет" @retry="reload()"
   >
+    <template #action>
+      <UButton color="neutral" variant="outline" icon="i-lucide-calendar-clock" :to="sectionPath(tenantId, 'automation')">Расписание</UButton>
+    </template>
     <div class="space-y-6">
       <section v-for="[date, items] in byDate" :key="date" class="grid gap-3 md:grid-cols-[7rem_1fr]">
         <div class="flex items-baseline gap-2 md:block">
@@ -42,14 +52,16 @@ async function setStatus(item: any, status: string) {
           <div v-for="item in items" :key="item.id" class="flex flex-wrap items-center gap-x-4 gap-y-2 p-4" :class="item.status === 'skipped' ? 'opacity-50' : ''">
             <span class="w-12 font-mono text-sm tabular-nums text-muted">{{ item.time }}</span>
             <div class="min-w-0 flex-1">
-              <p class="font-medium text-highlighted">{{ item.topic }}</p>
-              <p class="text-sm text-muted">{{ item.rubric }}</p>
+              <p class="break-words font-medium text-highlighted">{{ item.topic }}</p>
+              <p v-if="item.rubric" class="text-sm text-muted">{{ item.rubric }}</p>
             </div>
-            <UBadge :color="STATUS[item.status]?.color" variant="subtle">{{ STATUS[item.status]?.label }}</UBadge>
+            <UBadge :color="STATUS[item.status]?.color ?? 'neutral'" variant="subtle">{{ STATUS[item.status]?.label ?? 'Тема' }}</UBadge>
+            <UButton v-if="item.status === 'drafted' && item.postId" size="xs" color="neutral" variant="ghost" trailing-icon="i-lucide-arrow-right" :to="`${sectionPath(tenantId, 'posts')}?post=${item.postId}`">Пост</UButton>
             <div v-if="item.status === 'idea' || item.status === 'accepted'" class="flex gap-1">
-              <UButton v-if="item.status === 'idea'" size="xs" icon="i-lucide-check" @click="setStatus(item, 'accepted')">Принять</UButton>
-              <UButton size="xs" color="neutral" variant="ghost" @click="setStatus(item, 'skipped')">Пропустить</UButton>
+              <UButton v-if="item.status === 'idea'" size="xs" icon="i-lucide-check" :loading="busy === `${item.id}:accepted`" :disabled="!!busy" @click="setStatus(item, 'accepted')">Принять</UButton>
+              <UButton size="xs" color="neutral" variant="ghost" :loading="busy === `${item.id}:skipped`" :disabled="!!busy" @click="setStatus(item, 'skipped')">Пропустить</UButton>
             </div>
+            <UButton v-else-if="item.status === 'skipped'" size="xs" color="neutral" variant="ghost" :loading="busy === `${item.id}:idea`" :disabled="!!busy" @click="setStatus(item, 'idea')">Вернуть</UButton>
           </div>
         </div>
       </section>

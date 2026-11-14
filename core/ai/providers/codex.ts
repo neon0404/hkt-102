@@ -76,7 +76,7 @@ async function generatedImage(threadId: string): Promise<Buffer | null> {
   if (!threadId) return null
   const dir = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'generated_images', threadId)
   const files = await readdir(dir).catch(() => [] as string[])
-  const pngs = await Promise.all(files.filter(f => /.(png|jpe?g|webp)$/i.test(f)).map(async f => ({ f, t: (await stat(join(dir, f))).mtimeMs })))
+  const pngs = await Promise.all(files.filter(f => /\.(png|jpe?g|webp)$/i.test(f)).map(async f => ({ f, t: (await stat(join(dir, f))).mtimeMs })))
   const last = pngs.sort((a, b) => b.t - a.t)[0]
   if (!last) return null
   const buf = await readFile(join(dir, last.f)).catch(() => null)
@@ -89,7 +89,7 @@ async function codexDefaultModel(): Promise<string> {
   if (configuredModel !== null) return configuredModel
   try {
     const home = process.env.CODEX_HOME || join(homedir(), '.codex')
-    configuredModel = (await readFile(join(home, 'config.toml'), 'utf8')).match(/^models*=s*"([^"]+)"/m)?.[1] ?? ''
+    configuredModel = (await readFile(join(home, 'config.toml'), 'utf8')).match(/^model\s*=\s*"([^"]+)"/m)?.[1] ?? ''
   }
   catch { configuredModel = '' }
   return configuredModel
@@ -151,6 +151,8 @@ function runCodex(extraArgs: string[], prompt: string, cwd: string, timeoutMs: n
 export function codexLoginStatus(): Promise<{ ok: boolean, text: string }> {
   return new Promise((resolve) => {
     const child = spawn(config.codexBin, ['login', 'status'], { windowsHide: true })
+    const timer = setTimeout(() => { child.kill(); resolve({ ok: false, text: 'Codex CLI не ответил за 10 секунд' }) }, 10_000)
+    child.on('close', () => clearTimeout(timer))
     let out = ''
     child.stdout.on('data', d => (out += d))
     child.stderr.on('data', d => (out += d))

@@ -11,6 +11,8 @@ const stamp = ref(Date.now())
 const templates = Object.values(CARD_TEMPLATES)
 const preview = () => { stamp.value = Date.now() }
 
+const confirm = useConfirm()
+const uploading = ref('')
 const photos = ref<any[] | null>(null)
 const photoInput = ref<HTMLInputElement | null>(null)
 const loadPhotos = async () => { photos.value = await api<any[]>(`/tenants/${props.tenantId}/photos`, { silent: true }).catch(() => []) }
@@ -31,12 +33,16 @@ async function addPhotos(e: Event) {
   catch {}
   finally { input.value = ''; uploading.value = '' }
 }
-async function removePhoto(id: string) {
-  await api(`/tenants/${props.tenantId}/photos/${id}`, { method: 'DELETE' })
-  photos.value = photos.value?.filter(p => p.id !== id) ?? null
-  preview()
+function removePhoto(id: string) {
+  confirm({
+    title: 'Удалить фото из фотобанка?',
+    action: async () => {
+      await api(`/tenants/${props.tenantId}/photos/${id}`, { method: 'DELETE' })
+      photos.value = photos.value?.filter(p => p.id !== id) ?? null
+      preview()
+    },
+  })
 }
-const uploading = ref('')
 
 const form = reactive({
   name: tenant.value.name,
@@ -55,10 +61,7 @@ const form = reactive({
   secondary: tenant.value.settings.brand?.secondary ?? '#285055',
 })
 
-const TIMEZONES = [
-  'Europe/Kaliningrad', 'Europe/Moscow', 'Europe/Samara', 'Asia/Yekaterinburg', 'Asia/Omsk', 'Asia/Novosibirsk',
-  'Asia/Krasnoyarsk', 'Asia/Irkutsk', 'Asia/Yakutsk', 'Asia/Vladivostok', 'Asia/Magadan', 'Asia/Kamchatka',
-]
+const chatIdError = computed(() => form.alert_chat_id && !/^-?\d+$/.test(String(form.alert_chat_id).trim()) ? 'Только цифры' : undefined)
 const SLOTS = [
   { slot: 'logo_light', field: 'logo_light_media_id', label: 'Логотип белый', accept: 'image/png,image/svg+xml', icon: 'i-lucide-image' },
   { slot: 'logo', field: 'logo_media_id', label: 'Логотип цветной', accept: 'image/png,image/svg+xml', icon: 'i-lucide-image' },
@@ -69,24 +72,25 @@ const SLOTS = [
 const hasAsset = (field: string) => !!tenant.value.settings.brand?.[field]
 
 async function save() {
+  if (saving.value || !form.name.trim() || chatIdError.value) return
   saving.value = true
   try {
     await api(`/tenants/${props.tenantId}`, {
       method: 'PATCH',
       body: {
-        name: form.name, timezone: form.timezone,
+        name: form.name.trim(), timezone: form.timezone,
         settings: {
           description: form.description, tone: form.tone, approval_rule: form.approval_rule,
           daily_call_limit: Number(form.daily_call_limit), image_mode: form.image_mode, post_format: form.post_format,
           emoji_pack: form.emoji_pack.trim() || null, emoji_in_channel: form.emoji_in_channel,
-          alert_chat_id: form.alert_chat_id || null, auto_reply_comments: form.auto_reply_comments,
+          alert_chat_id: String(form.alert_chat_id).trim() || null, auto_reply_comments: form.auto_reply_comments,
           brand: { primary: form.primary, secondary: form.secondary },
         },
       },
     })
     await reloadTenant()
     toast.add({ title: 'Сохранено', color: 'success' })
-    await preview()
+    preview()
   }
   catch {}
   finally { saving.value = false }
@@ -112,25 +116,29 @@ async function upload(e: Event) {
   try {
     await api(`/tenants/${props.tenantId}/brand-assets`, { method: 'POST', body: fd })
     await reloadTenant()
-    toast.add({ title: 'Загружено', color: 'success' })
-    await preview()
+    toast.add({ title: 'Файл загружен', color: 'success' })
+    preview()
   }
   catch {}
   finally { input.value = ''; uploading.value = '' }
 }
 
-async function removeAsset(slot: string) {
-  await api(`/tenants/${props.tenantId}/brand-assets/${slot}`, { method: 'DELETE' })
-  await reloadTenant()
-  await preview()
+function removeAsset(s: (typeof SLOTS)[number]) {
+  confirm({
+    title: `Удалить «${s.label}»?`,
+    action: async () => {
+      await api(`/tenants/${props.tenantId}/brand-assets/${s.slot}`, { method: 'DELETE' })
+      await reloadTenant()
+      preview()
+    },
+  })
 }
-
 </script>
 
 <template>
   <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
     <Teleport defer to="#panel-actions">
-      <UButton type="submit" form="settings-form" :loading="saving" icon="i-lucide-check">Сохранить</UButton>
+      <UButton type="submit" form="settings-form" :loading="saving" :disabled="!form.name.trim() || !!chatIdError" icon="i-lucide-check">Сохранить</UButton>
     </Teleport>
 
     <form id="settings-form" class="space-y-6" @submit.prevent="save">
@@ -141,19 +149,19 @@ async function removeAsset(slot: string) {
             <UInput v-model="form.name" class="w-full" maxlength="120" required />
           </UFormField>
           <UFormField label="Часовой пояс">
-            <USelect v-model="form.timezone" :items="TIMEZONES" class="w-full" />
+            <USelect v-model="form.timezone" :items="TIMEZONES" value-key="value" class="w-full" />
           </UFormField>
           <UFormField label="Чем занимается" class="md:col-span-2">
-            <UTextarea v-model="form.description" class="w-full" :rows="3" autoresize />
+            <UTextarea v-model="form.description" class="w-full" :rows="3" maxlength="2000" autoresize />
           </UFormField>
           <UFormField label="Тон" class="md:col-span-2">
-            <UInput v-model="form.tone" class="w-full" />
+            <UInput v-model="form.tone" class="w-full" maxlength="300" />
           </UFormField>
         </div>
       </UCard>
 
       <UCard>
-        <template #header><h2 class="font-semibold text-highlighted">Работа AI</h2></template>
+        <template #header><h2 class="font-semibold text-highlighted">Контент и согласование</h2></template>
         <div class="grid gap-4 md:grid-cols-2">
           <UFormField label="Согласование">
             <USelect v-model="form.approval_rule" :items="[{ label: 'Достаточно одного', value: 'any_one' }, { label: 'Все согласующие', value: 'all' }]" class="w-full" />
@@ -168,11 +176,11 @@ async function removeAsset(slot: string) {
             <USelect v-model="form.post_format" :items="[{ label: 'Журнальный: подзаголовки, списки, карусель', value: 'rich' }, { label: 'Обычный: картинка с подписью', value: 'classic' }]" class="w-full" />
           </UFormField>
           <UFormField label="Набор эмодзи" hint="t.me/addemoji/…">
-            <UInput v-model="form.emoji_pack" class="w-full" placeholder="любые эмодзи" />
+            <UInput v-model="form.emoji_pack" class="w-full" placeholder="Обычные эмодзи" />
           </UFormField>
-          <USwitch v-model="form.emoji_in_channel" :disabled="!form.emoji_pack.trim()" label="Значки набора в канале" description="нужен юзернейм бота с Fragment" class="self-end pb-1" />
-          <UFormField label="Чат уведомлений" hint="ID Telegram">
-            <UInput v-model="form.alert_chat_id" class="w-full" placeholder="общий чат сервиса" />
+          <USwitch v-model="form.emoji_in_channel" :disabled="!form.emoji_pack.trim()" label="Значки набора в канале" description="Нужен бот с именем из Fragment" class="self-end pb-1" />
+          <UFormField label="Чат уведомлений" hint="ID чата в Telegram" :error="chatIdError">
+            <UInput v-model="form.alert_chat_id" class="w-full" inputmode="numeric" maxlength="20" placeholder="Общий чат сервиса" />
           </UFormField>
           <USwitch v-model="form.auto_reply_comments" label="Отвечать на комментарии без согласования" class="md:col-span-2" />
         </div>
@@ -202,8 +210,8 @@ async function removeAsset(slot: string) {
                 <UIcon :name="hasAsset(s.field) ? 'i-lucide-check' : s.icon" class="size-4" />
               </span>
               <span class="min-w-0 flex-1 truncate text-sm font-medium text-highlighted">{{ s.label }}</span>
-              <UButton v-if="hasAsset(s.field)" size="sm" color="neutral" variant="ghost" icon="i-lucide-x" aria-label="Убрать" @click="removeAsset(s.slot)" />
-              <UButton size="sm" color="neutral" variant="outline" icon="i-lucide-upload" :loading="uploading === s.slot" @click="pick(s)">
+              <UButton v-if="hasAsset(s.field)" size="sm" color="neutral" variant="ghost" icon="i-lucide-x" :aria-label="`Удалить: ${s.label}`" @click="removeAsset(s)" />
+              <UButton size="sm" color="neutral" variant="outline" icon="i-lucide-upload" :loading="uploading === s.slot" :disabled="!!uploading" @click="pick(s)">
                 {{ hasAsset(s.field) ? 'Заменить' : 'Загрузить' }}
               </UButton>
             </li>
@@ -214,17 +222,17 @@ async function removeAsset(slot: string) {
       <UCard :ui="{ header: 'flex items-center justify-between gap-3' }">
         <template #header>
           <h2 class="font-semibold text-highlighted">Фотобанк <span v-if="photos?.length" class="ms-1 font-normal text-muted">{{ photos.length }}</span></h2>
-          <UButton size="sm" color="neutral" variant="outline" icon="i-lucide-image-plus" :loading="uploading === 'photos'" @click="photoInput?.click()">Добавить фото</UButton>
+          <UButton size="sm" color="neutral" variant="outline" icon="i-lucide-image-plus" :loading="uploading === 'photos'" :disabled="!!uploading" @click="photoInput?.click()">Добавить фото</UButton>
         </template>
         <input ref="photoInput" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" @change="addPhotos">
         <div v-if="photos === null" class="grid grid-cols-4 gap-2 sm:grid-cols-6"><USkeleton v-for="i in 6" :key="i" class="aspect-square" /></div>
-        <UEmpty v-else-if="!photos.length" icon="i-lucide-images" title="Фото продукции, объектов, команды" description="Без фото AI подбирает снимки из открытых источников" :actions="[{ label: 'Добавить фото', icon: 'i-lucide-image-plus', color: 'neutral', variant: 'outline', onClick: () => photoInput?.click() }]" />
+        <UEmpty v-else-if="!photos.length" icon="i-lucide-images" title="Фотобанк пуст" :actions="[{ label: 'Добавить фото', icon: 'i-lucide-image-plus', color: 'neutral', variant: 'outline', onClick: () => photoInput?.click() }]" />
         <ul v-else class="grid grid-cols-4 gap-2 sm:grid-cols-6">
           <li v-for="ph in photos" :key="ph.id" class="group relative">
             <img :src="ph.url" :alt="ph.title ?? ''" :title="ph.title ?? ''" loading="lazy" class="aspect-square w-full rounded-md object-cover ring-1 ring-default">
             <UButton
-              size="xs" color="neutral" variant="solid" icon="i-lucide-x" aria-label="Убрать из фотобанка"
-              class="absolute right-1 top-1 opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100" @click="removePhoto(ph.id)"
+              size="xs" color="neutral" variant="solid" icon="i-lucide-x" aria-label="Удалить фото"
+              class="absolute right-1 top-1 transition lg:opacity-0 lg:group-hover:opacity-100 lg:focus-visible:opacity-100" @click="removePhoto(ph.id)"
             />
           </li>
         </ul>

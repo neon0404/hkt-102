@@ -1,10 +1,10 @@
 import { trackLinks } from '../analytics'
-import { decryptSecret } from '../crypto'
 import type { schema } from '../db/client'
 import { readMedia } from '../media'
 import { slidesOf } from '../services/post-media'
 import { mdEntities } from '../telegram/rich'
 import { uploadWallPhoto, vkPostUrl, wallPost } from './api'
+import { integrationCreds } from './oauth'
 
 type Version = typeof schema.postVersions.$inferSelect
 type Integration = typeof schema.integrations.$inferSelect
@@ -23,8 +23,7 @@ export async function vkText(tenantId: string, post: { id: string, rubric?: stri
 const isJpeg = (b: Buffer) => b[0] === 0xFF && b[1] === 0xD8
 
 export async function sendToVk(tenantId: string, post: { id: string, rubric?: string | null, kind: string }, version: Version, integration: Integration, publicationId: string): Promise<{ externalId: string, url: string }> {
-  if (!integration.credentialsEnc) throw new Error('Нет ключа доступа ВКонтакте — переподключите сообщество')
-  const token = decryptSecret(integration.credentialsEnc)
+  const token = (await integrationCreds(integration)).access_token
   const groupId = Number(integration.externalId)
   const message = await vkText(tenantId, post, publicationId, version)
   const ids = post.kind === 'post' && version.video?.status !== 'ready' ? slidesOf(version) : [version.imageMediaId].filter((x): x is string => !!x)

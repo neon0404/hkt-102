@@ -10,7 +10,7 @@ const DOT: Record<string, string> = { published: 'bg-green-500', planned: 'bg-pr
     <div class="grid grid-cols-7 gap-1">
       <button
         v-for="d in days" :key="d.key" type="button"
-        class="flex flex-col items-center gap-1 rounded-tile-sm py-2.5 transition active:scale-95"
+        class="flex flex-col items-center gap-1 rounded-tile-sm py-2.5 transition active:scale-95" :aria-label="`${d.w}, ${d.n}`" :aria-current="d.today ? 'date' : undefined"
         :class="(selected ? selected === d.key : d.today) && 'bg-muted'"
         @click="$emit('select', d)"
       >

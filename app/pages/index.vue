@@ -1,4 +1,5 @@
 <script setup lang="ts">
+useHead({ title: 'Компании · AI-маркетолог' })
 const { api } = useApi()
 const toast = useToast()
 const route = useRoute()
@@ -9,19 +10,15 @@ const open = ref(route.query.new === '1')
 const saving = ref(false)
 const form = reactive({ name: '', timezone: 'Asia/Yekaterinburg', description: '', tone: 'дружелюбно, по делу, без канцелярита' })
 
-const TIMEZONES = [
-  'Europe/Kaliningrad', 'Europe/Moscow', 'Europe/Samara', 'Asia/Yekaterinburg', 'Asia/Omsk', 'Asia/Novosibirsk',
-  'Asia/Krasnoyarsk', 'Asia/Irkutsk', 'Asia/Yakutsk', 'Asia/Vladivostok', 'Asia/Magadan', 'Asia/Kamchatka',
-]
-
 onMounted(async () => { await loadTenants(); loading.value = false })
 watch(() => route.query.new, (v) => { if (v === '1') open.value = true })
 watch(open, (v) => { if (!v && route.query.new) router.replace({ query: {} }) })
 
 async function create() {
+  if (saving.value || !form.name.trim()) return
   saving.value = true
   try {
-    const t = await api('/tenants', { method: 'POST', body: { name: form.name, timezone: form.timezone, settings: { description: form.description, tone: form.tone } } })
+    const t = await api('/tenants', { method: 'POST', body: { name: form.name.trim(), timezone: form.timezone, settings: { description: form.description.trim(), tone: form.tone.trim() } } })
     toast.add({ title: 'Компания создана', color: 'success' })
     open.value = false
     await loadTenants()
@@ -43,7 +40,7 @@ const done = (t: any) => SETUP_STEPS.filter(s => t.setup?.[s.step!]).length
       <USkeleton v-for="i in 3" :key="i" class="h-44 rounded-xl" />
     </div>
 
-    <UEmpty v-else-if="!tenants?.length" variant="outline" icon="i-lucide-building-2" title="Компаний пока нет" class="py-16">
+    <UEmpty v-else-if="!tenants?.length" variant="outline" icon="i-lucide-building-2" title="Компаний нет" class="py-16">
       <template #actions><UButton icon="i-lucide-plus" @click="open = true">Добавить компанию</UButton></template>
     </UEmpty>
 
@@ -57,7 +54,7 @@ const done = (t: any) => SETUP_STEPS.filter(s => t.setup?.[s.step!]).length
           <span class="flex size-11 shrink-0 items-center justify-center rounded-xl text-lg font-bold text-white" :style="{ background: tenantColor(t) }">{{ t.name[0] }}</span>
           <div class="min-w-0 flex-1">
             <h2 class="truncate text-base font-semibold text-highlighted">{{ t.name }}</h2>
-            <p class="text-xs text-muted">{{ t.timezone }}</p>
+            <p class="truncate text-xs text-muted">{{ tzLabel(t.timezone) }}</p>
           </div>
           <UBadge :color="tenantStatus(t).color" variant="subtle">{{ tenantStatus(t).label }}</UBadge>
         </div>
@@ -77,20 +74,20 @@ const done = (t: any) => SETUP_STEPS.filter(s => t.setup?.[s.step!]).length
             <UInput v-model="form.name" class="w-full" maxlength="120" required autofocus placeholder="Салаватстекло" />
           </UFormField>
           <UFormField label="Часовой пояс">
-            <USelect v-model="form.timezone" :items="TIMEZONES" class="w-full" />
+            <USelect v-model="form.timezone" :items="TIMEZONES" value-key="value" class="w-full" />
           </UFormField>
           <UFormField label="Чем занимается">
-            <UTextarea v-model="form.description" class="w-full" :rows="3" />
+            <UTextarea v-model="form.description" class="w-full" :rows="3" maxlength="2000" />
           </UFormField>
           <UFormField label="Тон">
-            <UInput v-model="form.tone" class="w-full" />
+            <UInput v-model="form.tone" class="w-full" maxlength="300" />
           </UFormField>
         </form>
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
           <UButton color="neutral" variant="ghost" @click="open = false">Отмена</UButton>
-          <UButton type="submit" form="tenant-form" :loading="saving">Создать</UButton>
+          <UButton type="submit" form="tenant-form" :loading="saving" :disabled="!form.name.trim()">Создать</UButton>
         </div>
       </template>
     </UModal>

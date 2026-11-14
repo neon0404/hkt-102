@@ -32,6 +32,8 @@ export function verifyPassword(password: string, stored: string): boolean {
   return expected.length === actual.length && timingSafeEqual(expected, actual)
 }
 
+export const isUuid = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
+
 export const randomCode = (bytes = 18) => randomBytes(bytes).toString('base64url')
 
 export const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex')
@@ -58,6 +60,7 @@ export function verifyToken<T = Record<string, unknown>>(token: string | undefin
 }
 
 export function verifyTelegramInitData(initData: string, botToken: string, maxAgeSec = 86400) {
+  if (!botToken) return null
   const params = new URLSearchParams(initData)
   const hash = params.get('hash')
   if (!hash) return null

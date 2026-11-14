@@ -54,7 +54,10 @@ export class ApiProvider implements LlmProvider {
     const item = json.data?.[0]
     let png: Buffer | null = null
     if (item?.b64_json) png = Buffer.from(item.b64_json, 'base64')
-    else if (item?.url) png = Buffer.from(await (await fetch(item.url)).arrayBuffer())
+    else if (item?.url) {
+      const res = await fetch(item.url, { signal: AbortSignal.timeout(60_000) })
+      if (res.ok) png = Buffer.from(await res.arrayBuffer())
+    }
     if (!png) return null
     return { png, provider: this.name, model: config.imageModel, durationMs: Date.now() - started }
   }

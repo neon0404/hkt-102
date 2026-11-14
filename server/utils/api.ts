@@ -3,7 +3,7 @@ import { and, eq } from 'drizzle-orm'
 import { config } from '~~/core/config'
 import { signToken, verifyTelegramInitData, verifyToken } from '~~/core/crypto'
 import { db, schema } from '~~/core/db/client'
-import { AppError, getTenantOr404 } from '~~/core/services/admin'
+import { AppError, getTenantOr404, operatorExists } from '~~/core/services/admin'
 
 export const SESSION_COOKIE = 'aim_session'
 const SESSION_HOURS = 12
@@ -60,11 +60,13 @@ export async function dispatch(event: H3Event) {
       if (r.method !== method) continue
       const m = path.match(r.regex)
       if (!m) continue
-      const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1]!)]))
+      let params: Record<string, string>
+      try { params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1]!)])) }
+      catch { throw new AppError(404, 'not_found', 'Маршрут не найден') }
       let operator = ''
       if (r.auth === 'operator') {
         operator = currentOperator(event) ?? ''
-        if (!operator) throw new AppError(401, 'unauthorized', 'Требуется вход')
+        if (!operator || !await operatorExists(operator)) throw new AppError(401, 'unauthorized', 'Требуется вход')
       }
       const tenantId = params.t ? (await getTenantOr404(params.t)).id : ''
       const type = getHeader(event, 'content-type') ?? ''

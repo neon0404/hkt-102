@@ -5,7 +5,7 @@ import { refreshPostStats } from '../core/analytics'
 import { db, pg, schema } from '../core/db/client'
 import { runMigrations } from '../core/db/migrate'
 import { handlers, PermanentError, reportJobFailure } from '../core/jobs/handlers'
-import { claimJob, completeJob, failJob, heartbeat, requeueStuck } from '../core/jobs/queue'
+import { claimJob, completeJob, failJob, heartbeat, requeueStuck, touchJob } from '../core/jobs/queue'
 import { systemTick } from '../core/scheduler'
 import { createBot } from '../core/telegram/bot'
 
@@ -19,6 +19,7 @@ async function runOne(): Promise<boolean> {
   if (!job) return false
   const handler = handlers[job.type]
   const started = Date.now()
+  const lock = setInterval(() => { touchJob(job.id).catch(() => {}) }, 60_000)
   try {
     if (!handler) throw new PermanentError(`Неизвестный тип задачи: ${job.type}`)
     const result = await handler(job)
@@ -33,6 +34,7 @@ async function runOne(): Promise<boolean> {
     log(`[job] ${job.type} ${job.id} ${outcome}: ${err.message}`)
     if (outcome === 'failed') await reportJobFailure(job, e).catch(x => log('[job] не удалось сообщить об ошибке', x))
   }
+  finally { clearInterval(lock) }
   return true
 }
 
@@ -84,6 +86,8 @@ async function maintenanceLoop() {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
+process.on('unhandledRejection', e => log('[worker] необработанная ошибка', e))
+
 async function main() {
   await runMigrations()
   log(`[worker] старт: провайдер по умолчанию ${config.llmProvider}, исполнителей ${CONCURRENCY}`)
@@ -94,7 +98,7 @@ async function main() {
   if (config.telegramBotToken) {
     const bot = createBot()
     await bot.api.setMyCommands([
-      { command: 'status', description: 'Последние материалы' },
+      { command: 'status', description: 'Последние посты' },
       { command: 'company', description: 'Сменить компанию' },
       { command: 'help', description: 'Что я умею' },
       { command: 'cancel', description: 'Отменить ввод' },
@@ -102,10 +106,10 @@ async function main() {
     if (config.publicBaseUrl.startsWith('https://')) {
       await bot.api.setChatMenuButton({ menu_button: { type: 'web_app', text: 'Кабинет', web_app: { url: `${config.publicBaseUrl}/app` } } }).catch(() => {})
     }
-    void bot.start({
+    bot.start({
       allowed_updates: ['message', 'callback_query'],
       onStart: me => log(`[bot] @${me.username} запущен (long polling)`),
-    })
+    }).catch(e => log('[bot] бот остановился с ошибкой', (e as Error).message))
     const stop = async () => { stopping = true; await bot.stop(); await pg.end({ timeout: 5 }); process.exit(0) }
     process.on('SIGINT', stop)
     process.on('SIGTERM', stop)

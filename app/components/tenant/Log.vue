@@ -25,6 +25,7 @@ const JOB: Record<string, string> = {
   ingest_source: 'Обработка источника', build_brand_profile: 'Профиль бренда', handle_message: 'Сообщение в боте', revise_post: 'Доработка поста',
   auto_draft: 'Автономный черновик', weekly_plan: 'Контент-план', draft_plan_item: 'Пост по плану', weekly_report: 'Отчёт', collect_metrics: 'Метрики канала',
   site_monitor: 'Мониторинг сайта', custom_task: 'Своя задача', analyze_competitor: 'Анализ конкурента', comment_reply: 'Ответ на комментарий', publish_post: 'Публикация',
+  agent_post: 'Пост от агента', voice_message: 'Голосовое сообщение',
 }
 const ACTION: Record<string, string> = {
   'tenant.created': 'Компания создана', 'tenant.updated': 'Настройки изменены', 'source.added': 'Источник добавлен', 'source.deleted': 'Источник удалён',
@@ -36,6 +37,21 @@ const ACTION: Record<string, string> = {
   'publication.published': 'Опубликовано', 'publication.failed': 'Ошибка публикации', 'publication.uncertain': 'Исход неизвестен', 'publication.retry': 'Повтор публикации', 'publication.marked_published': 'Отмечено опубликованным',
   'access.denied': 'Отказ в доступе', 'operator.alert': 'Уведомление оператору', 'plan.created': 'План предложен', 'plan.accepted': 'План принят', 'plan.skipped': 'План отклонён',
   'provider.tested': 'Проверка модели', 'competitor.added': 'Конкурент добавлен', 'competitor.analyzed': 'Конкурент изучен', 'comment.replied': 'Ответ на комментарий', 'site_monitor.new_item': 'Новость на сайте',
+  'approval.by_message': 'Решение сообщением', 'post.card_changed': 'Карточка изменена', 'post.layout_changed': 'Вёрстка изменена', 'post.publish_now': 'Публикация вне очереди',
+  'post.resent_for_approval': 'Повторно на согласование', 'publication.rich_fallback': 'Опубликован упрощённо', 'video.rendered': 'Ролик собран',
+  'photos.uploaded': 'Фото загружены', 'photos.removed': 'Фото удалено', 'api_token.created': 'Агент подключён', 'api_token.revoked': 'Доступ агента отозван', 'mcp.create_post': 'Агент заказал пост',
+  'plan_item.accepted': 'Тема принята', 'plan_item.skipped': 'Тема пропущена', 'plan_item.idea': 'Тема возвращена', 'plan_item.draft_now': 'Пост по теме заказан',
+}
+const REASON: Record<string, string> = {
+  channel_taken: 'канал занят другой компанией', foreign_approval: 'чужое согласование', no_role: 'нет роли', switch: 'нет доступа к компании', not_a_member: 'не участник',
+}
+const ROLE: Record<string, string> = { client: 'клиент', approver: 'согласующий' }
+const DETAIL: Record<string, (v: any) => string | null> = {
+  name: v => String(v), title: v => String(v), topic: v => String(v), email: v => String(v),
+  channel: v => /^(vk:)?-?\d+$/.test(String(v)) ? null : String(v).replace(/^vk:/, 'ВК: '), url: v => String(v), comment: v => `«${v}»`, instructions: v => `«${v}»`, reason: v => REASON[v] ?? null,
+  error: v => String(v), text: v => typeof v === 'string' ? v : null, version: v => `версия ${v}`, items: v => `тем: ${v}`, count: v => `фото: ${v}`,
+  at: v => `на ${fmtDate(v, tenant.value.timezone)}`, facts: v => `фактов: ${v}`, roles: v => Array.isArray(v) ? v.map(r => ROLE[r] ?? r).join(', ') : null, origin: v => POST_ORIGIN[v]?.toLowerCase() ?? null,
+  type: v => JOB[v]?.toLowerCase() ?? null, platform: v => v === 'vk' ? 'ВКонтакте' : null, via: v => v === 'mcp' ? 'через агента' : null, by: v => v === 'miniapp' ? 'из мини-приложения' : null,
 }
 const ACTOR: Record<string, { label: string, icon: string }> = {
   operator: { label: 'Оператор', icon: 'i-lucide-user-cog' }, member: { label: 'Участник', icon: 'i-lucide-user' },
@@ -48,13 +64,17 @@ const OP: Record<string, string> = {
 }
 const num = (n: number) => n.toLocaleString('ru-RU')
 const dur = (r: any) => r.finishedAt ? `${Math.max(1, Math.round((new Date(r.finishedAt).getTime() - new Date(r.createdAt).getTime()) / 1000))} с` : '—'
-const details = (d: Record<string, any>) => Object.entries(d ?? {}).filter(([, v]) => v !== null && v !== '' && typeof v !== 'object').map(([k, v]) => `${k}: ${v}`).join(' · ')
+const details = (d: Record<string, any>) => Object.entries(d ?? {})
+  .filter(([k, v]) => v !== null && v !== undefined && v !== '' && DETAIL[k])
+  .map(([k, v]) => DETAIL[k]!(v))
+  .filter(Boolean)
+  .join(' · ')
 
 const runColumns: TableColumn<any>[] = [
   { accessorKey: 'type', header: 'Задача' },
   { accessorKey: 'status', header: 'Статус' },
   { accessorKey: 'attempts', header: 'Попытки', meta: { class: { th: 'text-right', td: 'text-right' } } },
-  { accessorKey: 'llmCalls', header: 'Вызовы', meta: { class: { th: 'text-right', td: 'text-right' } } },
+  { accessorKey: 'llmCalls', header: 'Вызовы модели', meta: { class: { th: 'text-right', td: 'text-right' } } },
   { id: 'duration', header: 'Время', meta: { class: { th: 'text-right', td: 'text-right' } } },
   { accessorKey: 'createdAt', header: 'Создана' },
 ]
@@ -78,7 +98,7 @@ const usageStats = computed(() => usage.value
       { label: 'Вызовов за 30 дней', value: num(usage.value.total.calls) },
       { label: 'Токенов', value: num(usage.value.total.input_tokens + usage.value.total.output_tokens) },
       { label: 'На опубликованный пост', value: usage.value.published_posts ? (usage.value.total.calls / usage.value.published_posts).toFixed(1) : '—' },
-      { label: 'По тарифам API', value: `$${usage.value.total.cost_estimate.toFixed(2)}` },
+      { label: 'Стоимость по API', value: `$${usage.value.total.cost_estimate.toFixed(2)}` },
     ]
   : [])
 </script>
@@ -95,7 +115,7 @@ const usageStats = computed(() => usage.value
         <template #type-cell="{ row }">
           <div class="max-w-md">
             <p class="font-medium text-highlighted">
-              {{ JOB[row.original.type] ?? row.original.type }}
+              {{ JOB[row.original.type] ?? 'Задача' }}
               <UIcon v-if="row.original.scheduledJobId" :name="row.original.payload?.manual ? 'i-lucide-hand' : 'i-lucide-calendar-clock'" class="ms-1 size-3.5 align-[-2px] text-dimmed" />
             </p>
             <p v-if="row.original.error" class="truncate text-xs text-error" :title="row.original.error">{{ row.original.error }}</p>
@@ -113,13 +133,13 @@ const usageStats = computed(() => usage.value
       <UTable :data="audit ?? []" :columns="auditColumns" class="rounded-xl border border-default">
         <template #createdAt-cell="{ row }"><span class="whitespace-nowrap text-muted">{{ fmtDate(row.original.createdAt, tenant.timezone) }}</span></template>
         <template #actorType-cell="{ row }">
-          <span class="flex items-center gap-1.5 text-toned"><UIcon :name="ACTOR[row.original.actorType]?.icon ?? 'i-lucide-circle'" class="size-4 text-dimmed" />{{ ACTOR[row.original.actorType]?.label ?? row.original.actorType }}</span>
+          <span class="flex items-center gap-1.5 text-toned"><UIcon :name="ACTOR[row.original.actorType]?.icon ?? 'i-lucide-circle'" class="size-4 text-dimmed" />{{ ACTOR[row.original.actorType]?.label ?? 'Система' }}</span>
         </template>
         <template #action-cell="{ row }">
-          <span class="font-medium" :class="row.original.action === 'access.denied' ? 'text-error' : 'text-highlighted'">{{ ACTION[row.original.action] ?? row.original.action }}</span>
+          <span class="font-medium" :class="row.original.action === 'access.denied' ? 'text-error' : 'text-highlighted'">{{ ACTION[row.original.action] ?? 'Событие' }}</span>
         </template>
         <template #data-cell="{ row }">
-          <p class="max-w-md truncate text-xs text-muted" :title="JSON.stringify(row.original.data)">{{ details(row.original.data) }}</p>
+          <p class="max-w-md truncate text-xs text-muted" :title="details(row.original.data)">{{ details(row.original.data) || '—' }}</p>
         </template>
       </UTable>
     </LoadState>
@@ -134,7 +154,7 @@ const usageStats = computed(() => usage.value
           </div>
         </div>
         <UTable :data="usage.by_operation" :columns="usageColumns" class="rounded-xl border border-default">
-          <template #operation-cell="{ row }"><span class="font-medium text-highlighted">{{ OP[row.original.operation] ?? row.original.operation }}</span></template>
+          <template #operation-cell="{ row }"><span class="font-medium text-highlighted">{{ OP[row.original.operation] ?? 'Прочее' }}</span></template>
           <template #provider-cell="{ row }"><span class="text-toned">{{ PROVIDER_NAMES[row.original.provider] ?? row.original.provider }}</span></template>
           <template #calls-cell="{ row }"><span class="tabular-nums">{{ num(row.original.calls) }}</span></template>
           <template #input_tokens-cell="{ row }"><span class="tabular-nums text-toned">{{ num(row.original.input_tokens) }}</span></template>

@@ -8,7 +8,9 @@ import { mediaAbsolutePath } from '../media'
 export class IngestError extends Error {}
 
 function isPrivateAddress(ip: string): boolean {
-  if (ip.includes(':')) return ip === '::1' || ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80')
+  const mapped = ip.toLowerCase().match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
+  if (mapped) return isPrivateAddress(mapped[1]!)
+  if (ip.includes(':')) return ip === '::' || ip === '::1' || ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80')
   const [a, b] = ip.split('.').map(Number) as [number, number]
   return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
 }
@@ -26,16 +28,28 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
   return url
 }
 
+export async function fetchPublic(raw: string | URL, init: RequestInit = {}, hops = 5): Promise<{ res: Response, url: URL }> {
+  let url = await assertPublicUrl(String(raw))
+  for (let i = 0; ; i++) {
+    const res = await fetch(url, { ...init, redirect: 'manual' })
+    const next = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null
+    if (!next) return { res, url }
+    if (i >= hops) throw new IngestError('Слишком много перенаправлений')
+    url = await assertPublicUrl(new URL(next, url).toString())
+  }
+}
+
 export async function fetchUrlText(raw: string): Promise<{ title: string, text: string }> {
-  const url = await assertPublicUrl(raw)
   let res: Response
+  let url: URL
   try {
-    res = await fetch(url, {
-      signal: AbortSignal.timeout(20_000), redirect: 'follow',
+    ({ res, url } = await fetchPublic(raw, {
+      signal: AbortSignal.timeout(20_000),
       headers: { 'user-agent': 'Mozilla/5.0 (compatible; AIMarketerBot/1.0)', 'accept-language': 'ru,en;q=0.8' },
-    })
+    }))
   }
   catch (e) {
+    if (e instanceof IngestError) throw e
     throw new IngestError((e as Error).name === 'TimeoutError' ? 'Сайт не ответил за 20 секунд' : 'Сайт недоступен')
   }
   if (!res.ok) throw new IngestError(`Сайт ответил кодом ${res.status}`)

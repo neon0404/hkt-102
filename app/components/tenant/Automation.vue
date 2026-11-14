@@ -24,7 +24,7 @@ const PRESETS = [
   { label: 'По пятницам в 17:00', value: '0 17 * * 5' },
   { label: 'Каждые 3 часа', value: '0 */3 * * *' },
   { label: 'Каждый час', value: '0 * * * *' },
-  { label: 'Своё выражение cron', value: 'custom' },
+  { label: 'Своё расписание (cron)', value: 'custom' },
 ]
 const RUN_STATUS: Record<string, { label: string, color: any, icon: string, cls: string }> = {
   queued: { label: 'В очереди', color: 'neutral', icon: 'i-lucide-clock', cls: 'text-muted' },
@@ -35,7 +35,7 @@ const RUN_STATUS: Record<string, { label: string, color: any, icon: string, cls:
 }
 const columns: TableColumn<any>[] = [
   { id: 'task', header: 'Задача' },
-  { accessorKey: 'nextRunAt', header: 'Следующий', meta: { class: { td: 'whitespace-nowrap' } } },
+  { accessorKey: 'nextRunAt', header: 'Следующий запуск', meta: { class: { th: 'hidden sm:table-cell', td: 'hidden sm:table-cell whitespace-nowrap' } } },
   { id: 'actions', meta: { class: { td: 'text-right w-0' } } },
 ]
 
@@ -49,14 +49,23 @@ function cronInTwoMinutes() {
   return `${get('minute')} ${get('hour')} * * *`
 }
 
+const cronError = computed(() => !form.inMinutes && form.preset === 'custom' && form.cron.trim() && form.cron.trim().split(/\s+/).length !== 5 ? 'Нужно 5 полей: минута час день месяц день недели' : undefined)
+const canCreate = computed(() => {
+  if (form.type === 'site_monitor' && !form.url.trim()) return false
+  if (form.type === 'custom_task' && !form.text.trim()) return false
+  if (!form.inMinutes && form.preset === 'custom' && (!form.cron.trim() || cronError.value)) return false
+  return true
+})
+
 async function create() {
+  if (saving.value || !canCreate.value) return
   saving.value = true
   try {
-    const cron = form.inMinutes ? cronInTwoMinutes() : form.preset === 'custom' ? form.cron : form.preset
+    const cron = form.inMinutes ? cronInTwoMinutes() : form.preset === 'custom' ? form.cron.trim().replace(/\s+/g, ' ') : form.preset
     const params: Record<string, any> = {}
-    if (form.type === 'site_monitor') params.url = form.url
-    if (form.type === 'custom_task') params.text = form.text
-    if (form.type === 'auto_draft' && form.rubric) params.rubric = form.rubric
+    if (form.type === 'site_monitor') params.url = form.url.trim()
+    if (form.type === 'custom_task') params.text = form.text.trim()
+    if (form.type === 'auto_draft' && form.rubric.trim()) params.rubric = form.rubric.trim()
     await api(`/tenants/${props.tenantId}/schedules`, { method: 'POST', body: { type: form.type, cron, params, enabled: true } })
     toast.add({ title: 'Расписание создано', color: 'success' })
     open.value = false
@@ -67,20 +76,41 @@ async function create() {
   finally { saving.value = false }
 }
 
+const confirm = useConfirm()
+const busy = ref('')
 async function toggle(s: any) {
-  await api(`/tenants/${props.tenantId}/schedules/${s.id}`, { method: 'PATCH', body: { enabled: !s.enabled } })
-  await reload(true)
-  await reloadTenant()
+  if (busy.value) return
+  busy.value = `toggle:${s.id}`
+  try {
+    await api(`/tenants/${props.tenantId}/schedules/${s.id}`, { method: 'PATCH', body: { enabled: !s.enabled } })
+    await reload(true)
+    await reloadTenant()
+  }
+  catch {}
+  finally { busy.value = '' }
 }
 async function runNow(s: any) {
-  await api(`/tenants/${props.tenantId}/schedules/${s.id}/run-now`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } })
-  toast.add({ title: 'Запущено', color: 'info' })
-  await reloadRuns(true)
+  if (busy.value) return
+  busy.value = `run:${s.id}`
+  try {
+    await api(`/tenants/${props.tenantId}/schedules/${s.id}/run-now`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } })
+    toast.add({ title: 'Задача запущена', color: 'info' })
+    await reloadRuns(true)
+  }
+  catch {}
+  finally { busy.value = '' }
 }
-async function remove(s: any) {
-  await api(`/tenants/${props.tenantId}/schedules/${s.id}`, { method: 'DELETE' })
-  await reload(true)
-  await reloadTenant()
+function remove(s: any) {
+  confirm({
+    title: 'Удалить расписание?',
+    description: s.title || typeOf(s.type)?.label,
+    action: async () => {
+      await api(`/tenants/${props.tenantId}/schedules/${s.id}`, { method: 'DELETE' })
+      toast.add({ title: 'Расписание удалено', color: 'success' })
+      await reload(true)
+      await reloadTenant()
+    },
+  })
 }
 const scheduleRuns = computed(() => (runs.value ?? []).filter(r => r.scheduledJobId).slice(0, 10))
 const typeOf = (t: string) => TYPES.find(x => x.value === t)
@@ -97,11 +127,11 @@ const typeOf = (t: string) => TYPES.find(x => x.value === t)
       <UTable :data="data ?? []" :columns="columns" class="rounded-xl border border-default" :ui="{ td: 'py-2.5' }">
         <template #task-cell="{ row }">
           <div class="flex items-center gap-3" :class="row.original.enabled ? '' : 'opacity-50'">
-            <USwitch :model-value="row.original.enabled" size="sm" :aria-label="row.original.enabled ? 'Выключить' : 'Включить'" @update:model-value="toggle(row.original)" />
+            <USwitch :model-value="row.original.enabled" size="sm" :loading="busy === `toggle:${row.original.id}`" :disabled="!!busy" :aria-label="row.original.enabled ? 'Выключить' : 'Включить'" @update:model-value="toggle(row.original)" />
             <span class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><UIcon :name="typeOf(row.original.type)?.icon ?? 'i-lucide-calendar-clock'" class="size-4" /></span>
-            <div class="min-w-0 max-w-xs xl:max-w-md">
-              <p class="truncate font-medium text-highlighted">{{ row.original.title }}</p>
-              <p v-if="row.original.params?.url || row.original.params?.text" class="truncate text-xs text-muted">{{ row.original.params?.url || row.original.params?.text }}</p>
+            <div class="min-w-0 max-w-[12rem] sm:max-w-xs xl:max-w-md">
+              <p class="truncate font-medium text-highlighted">{{ row.original.title || row.original.type_label || typeOf(row.original.type)?.label }}</p>
+              <p v-if="row.original.params?.url || row.original.params?.text" class="truncate text-xs text-muted" :title="row.original.params?.url || row.original.params?.text">{{ row.original.params?.url || row.original.params?.text }}</p>
             </div>
           </div>
         </template>
@@ -110,8 +140,8 @@ const typeOf = (t: string) => TYPES.find(x => x.value === t)
         </template>
         <template #actions-cell="{ row }">
           <div class="flex justify-end gap-1">
-            <UTooltip text="Запустить сейчас"><UButton size="sm" color="neutral" variant="ghost" icon="i-lucide-play" aria-label="Запустить сейчас" @click="runNow(row.original)" /></UTooltip>
-            <UTooltip text="Удалить"><UButton size="sm" color="neutral" variant="ghost" icon="i-lucide-trash-2" aria-label="Удалить" @click="remove(row.original)" /></UTooltip>
+            <UTooltip text="Запустить сейчас"><UButton size="sm" color="neutral" variant="ghost" icon="i-lucide-play" aria-label="Запустить сейчас" :loading="busy === `run:${row.original.id}`" :disabled="!!busy" @click="runNow(row.original)" /></UTooltip>
+            <UTooltip text="Удалить"><UButton size="sm" color="error" variant="ghost" icon="i-lucide-trash-2" aria-label="Удалить" @click="remove(row.original)" /></UTooltip>
           </div>
         </template>
       </UTable>
@@ -121,7 +151,7 @@ const typeOf = (t: string) => TYPES.find(x => x.value === t)
       <h2 class="mb-3 text-sm font-semibold text-highlighted">Последние запуски</h2>
       <UTimeline
         :items="scheduleRuns.map(r => ({
-          title: typeOf(r.type)?.label ?? r.type,
+          title: typeOf(r.type)?.label ?? 'Задача',
           description: r.error || r.result?.topic || '',
           date: `${fmtDate(r.createdAt, tenant.timezone)} · ${r.payload?.manual ? 'вручную' : 'по расписанию'}`,
           icon: RUN_STATUS[r.status]?.icon,
@@ -144,18 +174,18 @@ const typeOf = (t: string) => TYPES.find(x => x.value === t)
             <USelect v-model="form.type" :items="TYPES" class="w-full" />
           </UFormField>
           <UFormField v-if="form.type === 'site_monitor'" label="Раздел новостей" required>
-            <UInput v-model="form.url" class="w-full" placeholder="https://salavatsteklo.ru/news/" required />
+            <UInput v-model="form.url" type="url" class="w-full" placeholder="https://salavatsteklo.ru/news/" required />
           </UFormField>
           <UFormField v-if="form.type === 'custom_task'" label="Что делать" required>
             <UTextarea v-model="form.text" class="w-full" :rows="3" placeholder="Пост-поздравление с началом недели" required />
           </UFormField>
           <UFormField v-if="form.type === 'auto_draft'" label="Рубрика" hint="необязательно">
-            <UInput v-model="form.rubric" class="w-full" />
+            <UInput v-model="form.rubric" class="w-full" maxlength="80" />
           </UFormField>
-          <UFormField v-if="!form.inMinutes" label="Когда" :hint="tenant.timezone">
+          <UFormField v-if="!form.inMinutes" label="Когда" :hint="tzLabel(tenant.timezone)">
             <USelect v-model="form.preset" :items="PRESETS" class="w-full" />
           </UFormField>
-          <UFormField v-if="!form.inMinutes && form.preset === 'custom'" label="cron">
+          <UFormField v-if="!form.inMinutes && form.preset === 'custom'" label="Выражение cron" :error="cronError">
             <UInput v-model="form.cron" class="w-full font-mono" placeholder="0 9 * * 1-5" required />
           </UFormField>
           <USwitch v-model="form.inMinutes" label="Тестовый запуск через 2 минуты" />
@@ -164,7 +194,7 @@ const typeOf = (t: string) => TYPES.find(x => x.value === t)
       <template #footer>
         <div class="flex w-full justify-end gap-2">
           <UButton color="neutral" variant="ghost" @click="open = false">Отмена</UButton>
-          <UButton type="submit" form="schedule-form" :loading="saving">Создать</UButton>
+          <UButton type="submit" form="schedule-form" :loading="saving" :disabled="!canCreate">Создать</UButton>
         </div>
       </template>
     </UModal>

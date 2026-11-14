@@ -18,7 +18,7 @@ import { acceptMemberText } from '../services/inbox'
 import { transcribe, VoiceError } from '../voice'
 import { config } from '../config'
 import { renderVideo } from '../video/render'
-import { assertPublicUrl, IngestError, ingestSource } from '../kb/ingest'
+import { fetchPublic, IngestError, ingestSource } from '../kb/ingest'
 import { chunksByIds, firstChunks, searchChunks } from '../kb/search'
 import {
   activeIntegration, activeMembers, addVersion, checkDraft, createPost, decideApproval, getPost, getTenant, notifyOperator, PostStateError,
@@ -33,6 +33,7 @@ type Handler = (job: JobRow) => Promise<Record<string, unknown>>
 type Member = typeof schema.tenantMembers.$inferSelect
 
 export class PermanentError extends Error {}
+class UserNotifiedError extends PermanentError {}
 
 const newRun = (job: JobRow): AiRun => ({ tenantId: job.tenantId!, jobRunId: job.id, calls: 0 })
 
@@ -130,7 +131,7 @@ const handleMessage: Handler = async (job) => {
       const { post, sent } = await preparePost(run, member, {
         topic, instructions: route.params.instructions, scheduledAt, origin: 'user_request', requestText: msg.text,
       })
-      if (sent && !member.roles.includes('approver')) await say('Материал готов и отправлен на согласование.', post.id)
+      if (sent && !member.roles.includes('approver')) await say('Пост готов и отправлен на согласование.', post.id)
       return { intent: route.intent, post_id: post.id }
     }
 
@@ -145,7 +146,7 @@ const handleMessage: Handler = async (job) => {
         return { intent: route.intent, post_id: open.postId, via: 'approval' }
       }
       const last = ctx.lastPost
-      if (!last) { await say('Пока нет поста, который можно изменить. Напишите, о чём подготовить публикацию.'); return { intent: route.intent } }
+      if (!last) { await say('Пока нет поста, который можно изменить. Напишите, о чём подготовить пост.'); return { intent: route.intent } }
       const post = await getPost(tenantId, last.id)
       if (!post || !['draft', 'in_review', 'approved', 'scheduled'].includes(post.status)) {
         await say(`Последний пост «${esc(last.title)}» уже в статусе «${STATUS_LABELS[post?.status ?? 'published']}» — изменить его нельзя. Напишите, если нужно подготовить новый.`, last.id)
@@ -222,7 +223,7 @@ const handleMessage: Handler = async (job) => {
       const topic = route.params.topic || msg.text
       await say('🎬 Пишу сценарий и собираю вертикальный ролик из фото компании — пришлю на согласование через минуту-две.')
       const { post, video } = await makeVideo(run, member, { topic, instructions: route.params.instructions })
-      if (video.status !== 'ready') await say(`Сценарий готов, но ролик собрать не удалось: ${esc(video.error ?? 'ошибка')}. Сценарий — в кабинете.`, post.id)
+      if (video.status !== 'ready') await say('Сценарий готов, но собрать ролик не получилось. Сценарий есть в кабинете, оператор уже знает.', post.id)
       else if (!member.roles.includes('approver')) await say('Ролик готов и отправлен на согласование.', post.id)
       return { intent: route.intent, post_id: post.id, video: video.status }
     }
@@ -233,7 +234,7 @@ const handleMessage: Handler = async (job) => {
       const parts = rows.map((c) => {
         const a = c.analysis as { summary?: string, ideas_for_us?: string[] } | null
         if (!a) return `### ${mdEsc(c.name)}\n_Анализ ещё не готов._`
-        const ideas = a.ideas_for_us?.length ? `\n\n${mdDetails('💡 Идеи для нас', a.ideas_for_us.slice(0, 5).map(i => `- ${mdEsc(i)}`).join('\n'))}` : ''
+        const ideas = a.ideas_for_us?.length ? `\n\n${mdDetails('Идеи для нас', a.ideas_for_us.slice(0, 5).map(i => `- ${mdEsc(i)}`).join('\n'))}` : ''
         return `### ${mdEsc(c.name)}\n${mdEsc(a.summary ?? '')}${ideas}`
       })
       await sayMd(`## 🔎 Конкуренты\n\n${parts.join('\n\n---\n\n')}`)
@@ -274,6 +275,7 @@ async function makeVideo(run: AiRun, member: Member | null, opts: { topic: strin
   catch (e) {
     video.error = (e as Error).message.slice(0, 300)
     console.warn('[video] не удалось собрать ролик', video.error)
+    await notifyOperator(tenantId, `[${tenant.name}] Ролик «${data.title}» не собрался: ${video.error}`).catch(() => {})
   }
   const draft = { title: data.title, text: scriptText(data), hashtags: [], facts: [], warnings: data.notes ? [data.notes] : [] }
   const post = opts.postId
@@ -305,7 +307,7 @@ export async function pendingApprovalFor(member: Member) {
 export async function decideByMessage(member: Member, action: 'a' | 'r', opts: { at?: Date | 'now' | null } = {}) {
   const open = await pendingApprovalFor(member)
   if (!open) {
-    return { ok: false, postId: null as string | null, text: member.roles.includes('approver') ? 'Сейчас нет материалов, которые ждут вашего решения.' : 'Решения по материалам принимает согласующий компании.' }
+    return { ok: false, postId: null as string | null, text: member.roles.includes('approver') ? 'Сейчас нет постов, которые ждут вашего решения.' : 'Решение по постам принимает согласующий компании.' }
   }
   const tenant = await getTenant(member.tenantId)
   if (action === 'a' && opts.at) {
@@ -324,13 +326,13 @@ export async function decideByMessage(member: Member, action: 'a' | 'r', opts: {
 
 export async function statusText(tenantId: string, tz: string): Promise<string> {
   const rows = await recentPosts(tenantId, 5)
-  if (!rows.length) return 'Постов пока нет. Напишите, о чём подготовить публикацию.'
+  if (!rows.length) return 'Постов пока нет. Напишите, о чём подготовить пост.'
   const ICON: Partial<Record<string, string>> = { published: '✅', scheduled: '🕒', approved: '👍', in_review: '⏳', draft: '✏️', rejected: '✖️', failed: '⚠️' }
-  const table = mdTable(['', 'Материал', 'Статус'], rows.map((p) => {
+  const table = mdTable(['', 'Пост', 'Статус'], rows.map((p) => {
     const when = p.status === 'scheduled' || p.status === 'in_review' || p.status === 'approved' ? `, ${humanTime(p.scheduledAt, tz)}` : ''
     return [ICON[p.status] ?? '•', `${p.kind === 'video_script' ? '🎬 ' : ''}${mdCell((p.title || p.topic || 'Без названия').slice(0, 70))}`, mdCell(`${STATUS_LABELS[p.status]}${when}`)]
   }), ['c', 'l', 'l'])
-  return `## 📋 Последние материалы\n\n${table}`
+  return `## 📋 Последние посты\n\n${table}`
 }
 
 async function revisionContext(tenantId: string, topic: string, prev: typeof schema.postVersions.$inferSelect) {
@@ -552,10 +554,10 @@ export async function buildReport(run: AiRun, tenantId: string, days: number): P
   return [
     `# 📊 Отчёт за ${days} дней`,
     mdTable(['Показатель', 'Значение'], rows, ['l', 'r']),
-    best.length ? `### 🏆 Что сработало лучше\n${mdTable(['', 'Лучший вариант', 'Просмотры'], best, ['l', 'l', 'r'])}` : '',
-    top.length ? `### 🔥 Топ постов\n${top.map((p, i) => `${i + 1}. ${p.url ? `[${mdEsc(p.title)}](${p.url})` : mdEsc(p.title)} — **${p.views}** просмотров${p.clicks ? `, ${p.clicks} переходов` : ''}`).join('\n')}` : '',
+    best.length ? `### Что сработало лучше\n${mdTable(['', 'Лучший вариант', 'Просмотры'], best, ['l', 'l', 'r'])}` : '',
+    top.length ? `### Топ постов\n${top.map((p, i) => `${i + 1}. ${p.url ? `[${mdEsc(p.title)}](${p.url})` : mdEsc(p.title)} — **${p.views}** просмотров${p.clicks ? `, ${p.clicks} переходов` : ''}`).join('\n')}` : '',
     `> ${mdEsc(data.summary).replace(/\n+/g, '\n> ')}`,
-    list('🔍 Выводы', data.findings), list('🧪 Гипотезы', data.hypotheses), list('✅ Что сделать', data.actions, true),
+    list('Выводы', data.findings), list('Гипотезы', data.hypotheses), list('Что сделать', data.actions, true),
   ].filter(Boolean).join('\n\n')
 }
 
@@ -579,8 +581,8 @@ const weeklyReport: Handler = async (job) => {
 const collectMetricsJob: Handler = async job => collectMetrics(job.tenantId!)
 
 async function listNewsLinks(pageUrl: string): Promise<Array<{ href: string, text: string }>> {
-  const url = await assertPublicUrl(pageUrl)
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { 'user-agent': 'Mozilla/5.0 (compatible; AIMarketerBot/1.0)' } })
+  const { res, url } = await fetchPublic(pageUrl, { signal: AbortSignal.timeout(20_000), headers: { 'user-agent': 'Mozilla/5.0 (compatible; AIMarketerBot/1.0)' } })
+    .catch((e) => { throw e instanceof IngestError ? new PermanentError(e.message) : e })
   if (!res.ok) throw new Error(`Страница новостей ответила кодом ${res.status}`)
   const { parseHTML } = await import('linkedom')
   const { document } = parseHTML(await res.text())
@@ -747,7 +749,7 @@ const voiceMessage: Handler = async (job) => {
   catch (e) {
     if (!(e instanceof VoiceError)) throw e
     await sayToMember(member, e.message.startsWith('Голосовые распознаёт') ? e.message : 'Не получилось разобрать голосовое. Попробуйте ещё раз или напишите текстом.')
-    throw new PermanentError(e.message)
+    throw new UserNotifiedError(e.message)
   }
   if (text.length < 2) {
     await sayToMember(member, 'Не расслышал. Попробуйте ещё раз или напишите текстом.')
@@ -803,21 +805,29 @@ export const handlers: Record<string, Handler> = {
   voice_message: withTyping(voiceMessage),
 }
 
+const JOB_LABELS: Record<string, string> = {
+  ingest_source: 'обработка источника', build_brand_profile: 'профиль бренда', handle_message: 'ответ на сообщение', revise_post: 'доработка поста',
+  agent_post: 'пост по запросу агента', auto_draft: 'пост по расписанию', weekly_plan: 'контент-план', draft_plan_item: 'пост по контент-плану',
+  weekly_report: 'отчёт', collect_metrics: 'сбор метрик', site_monitor: 'мониторинг сайта', custom_task: 'задача по расписанию',
+  analyze_competitor: 'анализ конкурента', comment_reply: 'ответ на комментарий', publish_post: 'публикация', voice_message: 'голосовое сообщение',
+}
+
 export async function reportJobFailure(job: JobRow, error: unknown) {
   if (!job.tenantId) return
   const tenant = await getTenant(job.tenantId).catch(() => null)
-  const reason = error instanceof LimitError
-    ? error.message
+  const known = error instanceof LimitError
+    ? 'Исчерпан дневной лимит запросов к модели.'
     : error instanceof ProviderError
-      ? (error.kind === 'limit' ? 'Исчерпан лимит плана у провайдера модели.' : error.kind === 'auth' ? 'Провайдер модели не авторизован.' : 'Сервис генерации сейчас недоступен.')
-      : (error as Error).message
+      ? (error.kind === 'limit' ? 'Исчерпан лимит подписки у провайдера модели.' : error.kind === 'auth' ? 'Провайдер модели не авторизован.' : 'Сервис генерации сейчас недоступен.')
+      : null
+  const reason = error instanceof LimitError ? error.message : known ?? (error as Error).message
   const interactive = ['handle_message', 'revise_post', 'voice_message'].includes(job.type)
-  if (interactive && job.payload.member_id) {
+  if (interactive && job.payload.member_id && !(error instanceof UserNotifiedError)) {
     const m = await memberById(job.tenantId, String(job.payload.member_id))
-    if (m) await sayToMember(m, `⚠️ Не получилось выполнить задачу: ${esc(reason)}\nЗадача сохранена, оператор уведомлён.`)
+    if (m) await sayToMember(m, `⚠️ Не получилось выполнить задачу. ${esc(known ?? 'Произошла техническая ошибка.')} Оператор уже знает, попробуйте позже.`)
   }
   if (job.type !== 'ingest_source') {
-    await notifyOperator(job.tenantId, `[${tenant?.name ?? job.tenantId}] Задача ${job.type} не выполнена: ${reason}`)
+    await notifyOperator(job.tenantId, `[${tenant?.name ?? 'компания'}] Не выполнено: ${JOB_LABELS[job.type] ?? job.type}. Причина: ${reason}`)
   }
 }
 

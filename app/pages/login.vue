@@ -8,6 +8,7 @@ const loading = ref(false)
 const error = ref('')
 
 async function submit() {
+  if (loading.value) return
   loading.value = true
   error.value = ''
   try {
@@ -37,7 +38,7 @@ async function submit() {
         <h1 class="font-display text-2xl text-highlighted">Вход</h1>
         <p class="mb-8 mt-1 text-sm text-muted">Панель оператора</p>
         <form class="space-y-4" @submit.prevent="submit">
-          <UFormField label="E-mail">
+          <UFormField label="Почта">
             <UInput v-model="form.email" type="email" autocomplete="username" size="lg" class="w-full" icon="i-lucide-mail" required autofocus />
           </UFormField>
           <UFormField label="Пароль">

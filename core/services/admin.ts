@@ -1,9 +1,10 @@
 import { and, desc, eq, sql } from 'drizzle-orm'
 import { loadPack, packName } from '../telegram/emoji-pack'
-import { canPostToWall, getGroup, groupRef, type VkGroup, VkError } from '../vk/api'
+import { findEditableGroup, groupRef, type VkGroup, VkError } from '../vk/api'
+import type { VkCreds } from '../vk/oauth'
 import { audit } from '../audit'
 import { config } from '../config'
-import { encryptSecret, hashPassword, randomCode, sha256 } from '../crypto'
+import { encryptSecret, hashPassword, isUuid, randomCode, sha256 } from '../crypto'
 import { db, schema } from '../db/client'
 import type { TenantSettings } from '../db/schema'
 import { enqueue } from '../jobs/queue'
@@ -34,6 +35,94 @@ export async function ensureAdmin() {
   if (!existing) await db.insert(schema.adminUsers).values({ email: config.adminEmail, passwordHash: hashPassword(config.adminPassword) }).onConflictDoNothing()
 }
 
+type AdminRow = typeof schema.adminUsers.$inferSelect
+export interface AdminInput { email?: string, password?: string, name?: string | null, tg_user_id?: number | string | null }
+
+const adminView = (a: AdminRow) => ({ id: a.id, email: a.email, name: a.name, tg_user_id: a.tgUserId, created_at: a.createdAt })
+
+function adminName(v: unknown) {
+  if (v === undefined || v === null) return null
+  const name = String(v).trim()
+  if (name.length > 120) throw invalid('Имя — до 120 знаков')
+  return name || null
+}
+
+function adminTgId(v: unknown) {
+  if (v === undefined || v === null || String(v).trim() === '') return null
+  const s = String(v).trim()
+  const n = Number(s)
+  if (!/^\d+$/.test(s) || !Number.isSafeInteger(n) || n <= 0) throw invalid('Telegram ID — положительное целое число')
+  return n
+}
+
+function adminPassword(v: unknown) {
+  const p = typeof v === 'string' ? v : ''
+  if (p.length < 8) throw invalid('Пароль — не короче 8 знаков')
+  if (p.length > 200) throw invalid('Пароль — не длиннее 200 знаков')
+  return p
+}
+
+export async function operatorExists(email: string) {
+  const [row] = await db.select({ id: schema.adminUsers.id }).from(schema.adminUsers).where(eq(schema.adminUsers.email, email))
+  return !!row
+}
+
+export async function listAdmins(currentEmail?: string) {
+  const rows = await db.select().from(schema.adminUsers).orderBy(schema.adminUsers.createdAt)
+  return rows.map(a => ({ ...adminView(a), is_current: a.email === currentEmail }))
+}
+
+export async function createAdmin(input: AdminInput, actor = 'operator') {
+  const email = String(input.email ?? '').trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) throw invalid('Укажите корректную почту')
+  const password = adminPassword(input.password)
+  const name = adminName(input.name)
+  const tgUserId = adminTgId(input.tg_user_id)
+  const [row] = await db.insert(schema.adminUsers).values({ email, passwordHash: hashPassword(password), name, tgUserId }).onConflictDoNothing().returning()
+  if (!row) throw conflict('Пользователь с такой почтой уже есть')
+  await audit(null, 'operator', actor, 'admin.created', 'admin_user', row.id, { email, name, tg_user_id: tgUserId })
+  return adminView(row)
+}
+
+export async function updateAdmin(id: string, patch: AdminInput, actor = 'operator') {
+  if (!isUuid(id)) throw notFound('Пользователь')
+  const set: Partial<typeof schema.adminUsers.$inferInsert> = {}
+  if (patch.name !== undefined) set.name = adminName(patch.name)
+  if (patch.tg_user_id !== undefined) set.tgUserId = adminTgId(patch.tg_user_id)
+  if (patch.password !== undefined && patch.password !== null && patch.password !== '') set.passwordHash = hashPassword(adminPassword(patch.password))
+  if (!Object.keys(set).length) {
+    const [row] = await db.select().from(schema.adminUsers).where(eq(schema.adminUsers.id, id))
+    if (!row) throw notFound('Пользователь')
+    return adminView(row)
+  }
+  const [row] = await db.update(schema.adminUsers).set(set).where(eq(schema.adminUsers.id, id)).returning()
+  if (!row) throw notFound('Пользователь')
+  await audit(null, 'operator', actor, 'admin.updated', 'admin_user', row.id, {
+    email: row.email, fields: Object.keys(set).filter(k => k !== 'passwordHash'), password_changed: !!set.passwordHash,
+  })
+  return adminView(row)
+}
+
+export function adminDeleteBlock(target: { email: string }, actor: string, total: number) {
+  if (target.email === actor) return 'Нельзя удалить самого себя'
+  if (total <= 1) return 'Нельзя удалить последнего пользователя'
+  return null
+}
+
+export async function deleteAdmin(id: string, actor = 'operator') {
+  if (!isUuid(id)) throw notFound('Пользователь')
+  const removed = await db.transaction(async (tx) => {
+    const all = await tx.select({ id: schema.adminUsers.id, email: schema.adminUsers.email }).from(schema.adminUsers).for('update')
+    const target = all.find(a => a.id === id)
+    if (!target) throw notFound('Пользователь')
+    const block = adminDeleteBlock(target, actor, all.length)
+    if (block) throw conflict(block)
+    await tx.delete(schema.adminUsers).where(eq(schema.adminUsers.id, id))
+    return target
+  })
+  await audit(null, 'operator', actor, 'admin.deleted', 'admin_user', removed.id, { email: removed.email })
+}
+
 export async function createTenant(input: { name: string, timezone?: string, settings?: TenantSettings }, actor = 'operator') {
   const name = input.name?.trim()
   if (!name || name.length > 120) throw invalid('Название обязательно, до 120 знаков')
@@ -52,7 +141,7 @@ export async function createTenant(input: { name: string, timezone?: string, set
 }
 
 export async function getTenantOr404(tenantId: string) {
-  if (!/^[0-9a-f-]{36}$/i.test(tenantId)) throw notFound('Компания')
+  if (!isUuid(tenantId)) throw notFound('Компания')
   const [t] = await db.select().from(schema.tenants).where(eq(schema.tenants.id, tenantId))
   if (!t) throw notFound('Компания')
   return t
@@ -198,20 +287,18 @@ export async function connectTelegramChannel(tenantId: string, input: { channel:
   return row!
 }
 
-export async function connectVkGroup(tenantId: string, input: { group: string, token?: string | null }, actor = 'operator', existingToken?: string | null) {
+export async function connectVkGroup(tenantId: string, input: { group: string, token?: string | null, creds?: VkCreds | null }, actor = 'operator') {
   const ref = groupRef(input.group)
   if (!ref) throw invalid('Укажите сообщество: ссылка vk.com/…, короткое имя или ID')
-  const token = input.token?.trim() || existingToken || ''
+  const creds: VkCreds | null = input.creds ?? (input.token?.trim() ? { access_token: input.token.trim() } : null)
+  const token = creds?.access_token ?? ''
   if (!token) throw invalid('Укажите ключ доступа администратора сообщества')
-  let group: VkGroup
-  try { group = await getGroup(ref, token) }
+  let group: VkGroup | null
+  try { group = await findEditableGroup(ref, token) }
   catch (e) {
     throw invalid(e instanceof VkError ? e.message : 'ВКонтакте недоступен, попробуйте позже')
   }
-  let problem: string | null
-  try { problem = await canPostToWall(group, token) }
-  catch (e) { throw invalid(e instanceof VkError ? e.message : 'ВКонтакте недоступен, попробуйте позже') }
-  if (problem) throw invalid(problem)
+  if (!group) throw invalid('Этого сообщества нет среди тех, где владелец ключа — администратор или редактор. Проверьте ссылку и что ключ получен под аккаунтом, который управляет сообществом.')
   const externalId = String(group.id)
   const [taken] = await db.select().from(schema.integrations).where(and(eq(schema.integrations.platform, 'vk'), eq(schema.integrations.externalId, externalId)))
   if (taken && taken.tenantId !== tenantId) {
@@ -220,7 +307,7 @@ export async function connectVkGroup(tenantId: string, input: { group: string, t
   }
   const values = {
     tenantId, platform: 'vk' as const, title: group.name, externalId, username: group.screen_name ?? null,
-    credentialsEnc: encryptSecret(token), status: 'active' as const, error: null, checkedAt: new Date(), meta: { admin_level: group.admin_level ?? null },
+    credentialsEnc: encryptSecret(JSON.stringify(creds)), status: 'active' as const, error: null, checkedAt: new Date(), meta: { admin_level: group.admin_level ?? null },
   }
   const [row] = taken
     ? await db.update(schema.integrations).set(values).where(eq(schema.integrations.id, taken.id)).returning()

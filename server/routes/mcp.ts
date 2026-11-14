@@ -48,7 +48,10 @@ export default defineEventHandler(async (event) => {
     setResponseStatus(event, 400)
     return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request' } }
   }
-  const out = (await Promise.all(messages.map(m => handleRpc(m && typeof m === 'object' ? m : {}, { agent })))).filter(Boolean)
+  const out = (await Promise.all(messages.map(m => handleRpc(m && typeof m === 'object' ? m : {}, { agent }).catch((e) => {
+    console.error('[mcp] ошибка обработки запроса', e)
+    return { jsonrpc: '2.0', id: m?.id ?? null, error: { code: -32603, message: 'Внутренняя ошибка сервиса' } }
+  })))).filter(Boolean)
   if (!out.length) { setResponseStatus(event, 202); return '' }
   setResponseHeader(event, 'Content-Type', 'application/json')
   return batch ? out : out[0]

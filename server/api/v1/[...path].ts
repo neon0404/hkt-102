@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises'
+import { exchangeCode, integrationCreds, takePending, vkAuthorizeUrl } from '~~/core/vk/oauth'
+import { groupRef } from '~~/core/vk/api'
 import { decryptSecret } from '~~/core/crypto'
 import { and, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm'
 import { callsToday, tenantProvider } from '~~/core/ai/ops'
@@ -7,7 +9,7 @@ import { codexLoginStatus } from '~~/core/ai/providers/codex'
 import { toJsonSchema } from '~~/core/ai/schemas'
 import { audit } from '~~/core/audit'
 import { config } from '~~/core/config'
-import { verifyPassword } from '~~/core/crypto'
+import { isUuid, verifyPassword } from '~~/core/crypto'
 import { db, schema } from '~~/core/db/client'
 import { dashboard, postPerformance, refreshPostStats } from '~~/core/analytics'
 import { metricsSummary } from '~~/core/jobs/handlers'
@@ -17,8 +19,8 @@ import { createApiToken, listApiTokens, revokeApiToken } from '~~/core/mcp/token
 import { chunksByIds } from '~~/core/kb/search'
 import { getMedia, mediaAbsolutePath, saveMedia } from '~~/core/media'
 import {
-  addSource, AppError, brandProfileState, conflict, connectTelegramChannel, createInvite, createTenant, ensureAdmin, invalid,
-  notFound, connectVkGroup, publicIntegration, runScheduleNow, saveSchedule, SCHEDULE_LABELS, tenantSetup, updateTenant,
+  addSource, AppError, brandProfileState, conflict, connectTelegramChannel, createAdmin, createInvite, createTenant, deleteAdmin, ensureAdmin, invalid,
+  listAdmins, notFound, updateAdmin, connectVkGroup, publicIntegration, runScheduleNow, saveSchedule, SCHEDULE_LABELS, tenantSetup, updateTenant,
 } from '~~/core/services/admin'
 import {
   addVersion, checkDraft, createPost, decideApproval, getPost, PostStateError, publishNow, reschedulePost, resendForApproval, sendForApproval, submitChangeRequest, updatePostCard, updatePostLayout,
@@ -34,7 +36,9 @@ import type { CardPatch, LayoutPatch } from '~~/core/services/posts'
 async function sendMediaFile(event: H3Event, m: { mime: string, path: string }) {
   setHeader(event, 'content-type', m.mime)
   setHeader(event, 'cache-control', 'private, max-age=3600')
-  const data = await readFile(mediaAbsolutePath(m.path))
+  setHeader(event, 'x-content-type-options', 'nosniff')
+  if (m.mime === 'image/svg+xml') setHeader(event, 'content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+  const data = await readFile(mediaAbsolutePath(m.path)).catch(() => { throw notFound('Файл') })
   if (!m.mime.startsWith('video/')) return data
   setHeader(event, 'accept-ranges', 'bytes')
   const range = /^bytes=(\d*)-(\d*)$/.exec(getHeader(event, 'range') ?? '')
@@ -49,7 +53,8 @@ async function sendMediaFile(event: H3Event, m: { mime: string, path: string }) 
   return data.subarray(start, end + 1)
 }
 
-const uuid = (v: string, what = 'Объект') => { if (!/^[0-9a-f-]{36}$/i.test(v)) throw notFound(what); return v }
+const num = (v: unknown, def: number, max: number) => Math.min(Math.max(Math.floor(Number(v)) || def, 1), max)
+const uuid = (v: string, what = 'Объект') => { if (!isUuid(v)) throw notFound(what); return v }
 const failures = new Map<string, { n: number, until: number }>()
 let adminReady: Promise<void> | null = null
 
@@ -72,6 +77,11 @@ route('POST', '/auth/login', async ({ event, body }) => {
 
 route('POST', '/auth/logout', ({ event }) => { deleteCookie(event, SESSION_COOKIE, { path: '/' }); return { ok: true } }, { auth: 'public' })
 route('GET', '/auth/me', ({ operator }) => ({ email: operator }))
+
+route('GET', '/admins', ({ operator }) => listAdmins(operator))
+route('POST', '/admins', ({ body, operator }) => createAdmin(body, operator), { status: 201 })
+route('PATCH', '/admins/:id', ({ params, body, operator }) => updateAdmin(params.id!, { name: body.name, tg_user_id: body.tg_user_id, password: body.password }, operator))
+route('DELETE', '/admins/:id', ({ params, operator }) => deleteAdmin(params.id!, operator))
 
 route('GET', '/health', async () => {
   let dbOk = false
@@ -233,7 +243,7 @@ const profileInput = z.object({
 route('PUT', '/tenants/:t/brand-profile', async ({ tenantId, body, operator }) => {
   const parsed = profileInput.safeParse(body)
   if (!parsed.success) throw invalid('Профиль заполнен неверно', { issues: parsed.error.issues.slice(0, 5) })
-  const ids = parsed.data.facts.map(f => f.chunk_id).filter((x): x is string => !!x && /^[0-9a-f-]{36}$/i.test(x))
+  const ids = parsed.data.facts.map(f => f.chunk_id).filter((x): x is string => isUuid(x))
   const own = new Set(ids.length ? (await db.select({ id: schema.kbChunks.id }).from(schema.kbChunks).where(and(eq(schema.kbChunks.tenantId, tenantId), inArray(schema.kbChunks.id, ids)))).map(r => r.id) : [])
   const data = { ...parsed.data, facts: parsed.data.facts.filter(f => f.claim.trim()).map(f => ({ claim: f.claim.trim(), chunk_id: f.chunk_id && own.has(f.chunk_id) ? f.chunk_id : null })) }
   const [{ v }] = await db.select({ v: sql<number>`coalesce(max(${schema.brandProfiles.version}), 0)::int` }).from(schema.brandProfiles).where(eq(schema.brandProfiles.tenantId, tenantId)) as [{ v: number }]
@@ -346,11 +356,35 @@ route('POST', '/tenants/:t/integrations', async ({ tenantId, body, operator }) =
   return row
 }, { status: 201 })
 
+route('GET', '/tenants/:t/vk/connect', ({ event, tenantId, query, operator }) => {
+  const group = String(query.group ?? '').trim()
+  if (!groupRef(group)) throw invalid('Укажите сообщество: ссылка vk.com/…, короткое имя или ID')
+  try { return sendRedirect(event, vkAuthorizeUrl({ tenantId, group, operator }), 302) }
+  catch (e) { throw invalid((e as Error).message) }
+})
+
+route('GET', '/vk/callback', async ({ event, query }) => {
+  const back = (tenantId: string | null, params: Record<string, string>) =>
+    sendRedirect(event, `${config.publicBaseUrl}${tenantId ? `/t/${tenantId}/channels` : '/'}?${new URLSearchParams(params)}`, 302)
+  const p = takePending(String(query.state ?? ''))
+  if (!p) return back(null, { vk_error: 'Вход через ВКонтакте устарел — начните подключение заново' })
+  if (query.error || !query.code) return back(p.tenantId, { vk_error: String(query.error_description || query.error || 'ВКонтакте не выдал доступ') })
+  try {
+    const creds = await exchangeCode(String(query.code), p.verifier, String(query.device_id ?? ''), String(query.state))
+    await connectVkGroup(p.tenantId, { group: p.group, creds }, p.operator)
+    await tenantSetup(p.tenantId)
+    return back(p.tenantId, { vk: 'ok' })
+  }
+  catch (e) {
+    return back(p.tenantId, { vk_error: (e as Error).message.slice(0, 300) })
+  }
+}, { auth: 'public' })
+
 route('POST', '/tenants/:t/integrations/:id/check', async ({ tenantId, params, operator }) => {
   const [i] = await db.select().from(schema.integrations).where(and(eq(schema.integrations.tenantId, tenantId), eq(schema.integrations.id, uuid(params.id!, 'Канал'))))
   if (!i) throw notFound('Канал')
   try {
-    if (i.platform === 'vk') return publicIntegration(await connectVkGroup(tenantId, { group: i.externalId }, operator, i.credentialsEnc ? decryptSecret(i.credentialsEnc) : null))
+    if (i.platform === 'vk') return publicIntegration(await connectVkGroup(tenantId, { group: i.externalId, creds: await integrationCreds(i) }, operator))
     return publicIntegration(await connectTelegramChannel(tenantId, { channel: i.externalId, botToken: null }, operator))
   }
   catch (e) {
@@ -397,7 +431,7 @@ route('DELETE', '/tenants/:t/members/:id', async ({ tenantId, params, operator }
 })
 
 route('GET', '/tenants/:t/posts', ({ tenantId, query }) =>
-  listPosts(tenantId, { status: query.status || undefined, kind: query.kind || undefined, limit: Number(query.limit) || 50, offset: Number(query.offset) || 0 }))
+  listPosts(tenantId, { status: query.status || undefined, kind: query.kind || undefined, limit: num(query.limit, 50, 200), offset: Math.max(Math.floor(Number(query.offset)) || 0, 0) }))
 
 route('GET', '/tenants/:t/posts/:id', async ({ tenantId, params }) => {
   const post = await postDetail(tenantId, uuid(params.id!, 'Публикация'))
@@ -553,6 +587,9 @@ route('POST', '/tenants/:t/posts/:id/mark-published', async ({ tenantId, params,
   const post = await getPost(tenantId, postId)
   if (!post) throw notFound('Публикация')
   if (post.status !== 'failed') throw conflict('Доступно только для постов с неопределённым исходом публикации')
+  const url = typeof body.url === 'string' && body.url.trim() ? body.url.trim() : null
+  if (url && (!/^https?:\/\/\S+$/i.test(url) || url.length > 500)) throw invalid('Ссылка на пост должна начинаться с http:// или https://')
+  body.url = url
   await db.update(schema.publications).set({ status: 'published', publishedAt: new Date(), url: body.url ?? null, error: null })
     .where(and(eq(schema.publications.tenantId, tenantId), eq(schema.publications.postId, postId)))
   await db.update(schema.posts).set({ status: 'published' }).where(eq(schema.posts.id, postId))
@@ -582,7 +619,7 @@ route('POST', '/tenants/:t/schedules/:id/run-now', async ({ tenantId, params, op
 route('GET', '/tenants/:t/job-runs', ({ tenantId, query }) =>
   db.select().from(schema.jobRuns)
     .where(and(eq(schema.jobRuns.tenantId, tenantId), ...(query.status ? [eq(schema.jobRuns.status, query.status as any)] : [])))
-    .orderBy(desc(schema.jobRuns.createdAt)).limit(Math.min(Number(query.limit) || 100, 300)))
+    .orderBy(desc(schema.jobRuns.createdAt)).limit(num(query.limit, 100, 300)))
 
 route('GET', '/tenants/:t/job-runs/:id', async ({ tenantId, params }) => {
   const [j] = await db.select().from(schema.jobRuns).where(and(eq(schema.jobRuns.tenantId, tenantId), eq(schema.jobRuns.id, uuid(params.id!, 'Запуск'))))
@@ -591,11 +628,12 @@ route('GET', '/tenants/:t/job-runs/:id', async ({ tenantId, params }) => {
 })
 
 route('GET', '/tenants/:t/audit', ({ tenantId, query }) =>
-  db.select().from(schema.auditLogs).where(eq(schema.auditLogs.tenantId, tenantId)).orderBy(desc(schema.auditLogs.createdAt)).limit(Math.min(Number(query.limit) || 150, 500)))
+  db.select().from(schema.auditLogs).where(eq(schema.auditLogs.tenantId, tenantId)).orderBy(desc(schema.auditLogs.createdAt)).limit(num(query.limit, 150, 500)))
 
 route('GET', '/tenants/:t/usage', async ({ tenantId, query }) => {
   const from = query.from ? new Date(query.from) : new Date(Date.now() - 30 * 86400_000)
   const to = query.to ? new Date(query.to) : new Date()
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) throw invalid('Некорректный период')
   const range = and(eq(schema.llmUsage.tenantId, tenantId), gte(schema.llmUsage.createdAt, from), lte(schema.llmUsage.createdAt, to))
   const agg = { calls: sql<number>`count(*)::int`, input_tokens: sql<number>`coalesce(sum(${schema.llmUsage.inputTokens}),0)::int`, output_tokens: sql<number>`coalesce(sum(${schema.llmUsage.outputTokens}),0)::int`, images: sql<number>`coalesce(sum(${schema.llmUsage.images}),0)::int`, cost_estimate: sql<number>`coalesce(sum(${schema.llmUsage.costEstimate}),0)::float`, avg_ms: sql<number>`coalesce(avg(${schema.llmUsage.durationMs}),0)::int` }
   const [total] = await db.select(agg).from(schema.llmUsage).where(range)
@@ -606,11 +644,11 @@ route('GET', '/tenants/:t/usage', async ({ tenantId, query }) => {
   return { from, to, total, by_operation, by_day, calls_today: await callsToday(tenantId), daily_call_limit: t!.settings.daily_call_limit ?? 80, published_posts: published?.n ?? 0 }
 })
 
-route('GET', '/tenants/:t/analytics/summary', ({ tenantId, query }) => metricsSummary(tenantId, Math.min(Number(query.days) || 7, 90)))
+route('GET', '/tenants/:t/analytics/summary', ({ tenantId, query }) => metricsSummary(tenantId, num(query.days, 7, 90)))
 
 route('GET', '/tenants/:t/analytics/performance', async ({ tenantId, query }) => {
   const [t] = await db.select().from(schema.tenants).where(eq(schema.tenants.id, tenantId))
-  return postPerformance(tenantId, Math.min(Number(query.days) || 30, 180), t!.timezone)
+  return postPerformance(tenantId, num(query.days, 30, 180), t!.timezone)
 })
 
 route('POST', '/tenants/:t/analytics/refresh', async ({ tenantId }) => refreshPostStats(tenantId))
@@ -736,7 +774,7 @@ route('POST', '/miniapp/posts/:id/send-for-approval', async ({ event, params }) 
 
 route('POST', '/miniapp/posts/:id/publish-now', async ({ event, params }) => {
   const { member, user } = await miniappUser(event)
-  if (!member.roles.includes('approver')) throw new AppError(403, 'forbidden', 'Отправлять может только согласующий')
+  if (!member.roles.includes('approver')) throw new AppError(403, 'forbidden', 'Публиковать может только согласующий')
   const postId = uuid(params.id!, 'Публикация')
   const post = await getPost(member.tenantId, postId)
   if (!post) throw notFound('Публикация')

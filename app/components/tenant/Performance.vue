@@ -9,6 +9,7 @@ watch(days, () => reload())
 
 const refreshing = ref(false)
 async function refresh() {
+  if (refreshing.value) return
   refreshing.value = true
   try {
     const r = await api<any>(`/tenants/${props.tenantId}/analytics/refresh`, { method: 'POST' })
@@ -45,9 +46,11 @@ const top = computed(() => [...(data.value?.posts ?? [])].sort((a, b) => (b.view
       <h2 class="text-sm font-semibold text-highlighted">Эффективность публикаций</h2>
       <div class="flex items-center gap-1">
         <UFieldGroup size="xs">
-          <UButton v-for="d in [7, 30, 90]" :key="d" :color="days === d ? 'primary' : 'neutral'" :variant="days === d ? 'soft' : 'ghost'" @click="days = d">{{ d }} дн</UButton>
+          <UButton v-for="d in [7, 30, 90]" :key="d" :color="days === d ? 'primary' : 'neutral'" :variant="days === d ? 'soft' : 'ghost'" @click="days = d">{{ d }} {{ plural(d, ['день', 'дня', 'дней']) }}</UButton>
         </UFieldGroup>
-        <UButton size="xs" color="neutral" variant="ghost" icon="i-lucide-refresh-cw" :loading="refreshing" aria-label="Обновить показатели" @click="refresh" />
+        <UTooltip text="Обновить показатели">
+          <UButton size="xs" color="neutral" variant="ghost" icon="i-lucide-refresh-cw" :loading="refreshing" aria-label="Обновить показатели" @click="refresh" />
+        </UTooltip>
       </div>
     </div>
     <LoadState :loading="loading && !data" :error="error" @retry="reload()">
@@ -71,13 +74,13 @@ const top = computed(() => [...(data.value?.posts ?? [])].sort((a, b) => (b.view
                   <span class="truncate" :class="i === 0 && g.items.length > 1 ? 'font-semibold text-highlighted' : 'text-toned'">{{ s.label }}</span>
                   <span class="shrink-0 tabular-nums text-muted">
                     <span class="font-medium text-highlighted">{{ n(s.avgViews) }}</span>
-                    <template v-if="s.clicks"> · {{ s.clicks }} перех.</template>
+                    <template v-if="s.clicks"> · {{ s.clicks }} {{ plural(s.clicks, ['переход', 'перехода', 'переходов']) }}</template>
                   </span>
                 </div>
                 <div class="h-1.5 overflow-hidden rounded-full bg-elevated">
                   <div class="h-full rounded-full" :class="i === 0 ? 'bg-primary' : 'bg-primary/40'" :style="{ width: `${Math.round(((s.avgViews ?? 0) / maxOf(g.items)) * 100)}%` }" />
                 </div>
-                <p class="mt-1 text-[11px] text-dimmed">{{ s.posts }} {{ s.posts === 1 ? 'пост' : s.posts < 5 ? 'поста' : 'постов' }}<template v-if="s.ctr !== null"> · CTR {{ s.ctr }}%</template></p>
+                <p class="mt-1 text-[11px] text-dimmed">{{ s.posts }} {{ plural(s.posts, ['пост', 'поста', 'постов']) }}<template v-if="s.ctr !== null"> · CTR {{ s.ctr }}%</template></p>
               </li>
             </ul>
           </UCard>
@@ -93,7 +96,7 @@ const top = computed(() => [...(data.value?.posts ?? [])].sort((a, b) => (b.view
                 </div>
                 <div class="flex shrink-0 items-center gap-3 text-xs tabular-nums text-muted">
                   <span class="flex items-center gap-1"><UIcon name="i-lucide-eye" class="size-3.5" />{{ n(p.views) }}</span>
-                  <span class="flex items-center gap-1"><UIcon name="i-lucide-mouse-pointer-click" class="size-3.5" />{{ p.clicks }}</span>
+                  <span class="flex items-center gap-1"><UIcon name="i-lucide-mouse-pointer-click" class="size-3.5" />{{ n(p.clicks) }}</span>
                 </div>
               </NuxtLink>
             </li>

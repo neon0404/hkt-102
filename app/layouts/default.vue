@@ -23,11 +23,17 @@ let healthTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => { loadHealth(); healthTimer = setInterval(loadHealth, 30000) })
 onUnmounted(() => clearInterval(healthTimer))
 const healthy = computed(() => health.value?.status === 'ok')
-const healthLabel = computed(() => !health.value ? 'Проверка…' : healthy.value ? 'Сервис работает' : !health.value.db ? 'Нет связи с БД' : 'Worker не отвечает')
+const healthLabel = computed(() => !health.value ? 'Проверка…' : healthy.value ? 'Сервис работает' : !health.value.db ? 'Нет связи с базой' : 'Фоновые задачи не отвечают')
+const tenantsCount = computed(() => {
+  const n = tenants.value?.length ?? 0
+  return `${n} ${plural(n, ['компания', 'компании', 'компаний'])}`
+})
 
 async function logout() {
-  await api('/auth/logout', { method: 'POST' })
+  try { await api('/auth/logout', { method: 'POST', silent: true }) }
+  catch {}
   me.value = null
+  tenant.value = null
   await navigateTo('/login')
 }
 
@@ -35,7 +41,10 @@ const GROUP_LABEL = { work: 'Работа', setup: 'Настройка', system:
 
 const nav = computed<NavigationMenuItem[][]>(() => {
   if (!current.value) {
-    return [[{ label: 'Компании', icon: 'i-lucide-building-2', to: '/', exact: true, onSelect: () => { open.value = false } }]]
+    return [[
+      { label: 'Компании', icon: 'i-lucide-building-2', to: '/', exact: true, onSelect: () => { open.value = false } },
+      { label: 'Пользователи', icon: 'i-lucide-users-round', to: '/admins', onSelect: () => { open.value = false } },
+    ]]
   }
   const id = current.value.id
   return (Object.keys(GROUP_LABEL) as Array<keyof typeof GROUP_LABEL>).map(group => [
@@ -68,6 +77,7 @@ const tenantMenu = computed<DropdownMenuItem[][]>(() => [
 
 const userMenu = computed<DropdownMenuItem[][]>(() => [
   [{ type: 'label', label: me.value ?? 'Оператор', avatar: { text: (me.value ?? 'О')[0]!.toUpperCase() } }],
+  [{ label: 'Пользователи', icon: 'i-lucide-users-round', to: '/admins' }],
   [{
     label: colorMode.value === 'dark' ? 'Светлая тема' : 'Тёмная тема',
     icon: colorMode.value === 'dark' ? 'i-lucide-sun' : 'i-lucide-moon',
@@ -89,7 +99,7 @@ const searchGroups = computed(() => [
     label: 'Компании',
     items: (tenants.value ?? []).map(t => ({
       label: t.name,
-      suffix: t.timezone,
+      suffix: tzLabel(t.timezone),
       avatar: { text: t.name[0], style: { background: tenantColor(t), color: '#fff' } },
       to: `/t/${t.id}`,
     })),
@@ -141,6 +151,7 @@ const searchGroups = computed(() => [
             class="bg-default py-2 data-[state=open]:bg-elevated"
             :class="collapsed ? 'justify-center' : 'justify-between'"
             :ui="{ trailingIcon: 'text-muted' }"
+            :aria-label="current?.name ?? 'Все компании'"
           >
             <span class="flex min-w-0 items-center gap-2.5">
               <span
@@ -152,7 +163,7 @@ const searchGroups = computed(() => [
               </span>
               <span v-if="!collapsed" class="min-w-0 text-start">
                 <span class="block truncate text-sm font-semibold text-highlighted">{{ current?.name ?? 'Все компании' }}</span>
-                <span class="block truncate text-xs font-medium text-toned">{{ current ? tenantStatus(current).label : `${tenants?.length ?? 0} в работе` }}</span>
+                <span class="block truncate text-xs font-medium text-toned">{{ current ? tenantStatus(current).label : tenantsCount }}</span>
               </span>
             </span>
           </UButton>
@@ -185,7 +196,7 @@ const searchGroups = computed(() => [
           }"
         >
           <template #item-trailing="{ item }">
-            <span v-if="(item as any).pending" class="ms-auto size-2 rounded-full bg-warning ring-2 ring-(--ui-bg-muted)" title="Не настроено" />
+            <span v-if="(item as any).pending" class="ms-auto size-2 rounded-full bg-warning ring-2 ring-(--ui-bg-muted)" title="Не настроено" role="img" aria-label="Не настроено" />
           </template>
         </UNavigationMenu>
       </template>
@@ -211,6 +222,7 @@ const searchGroups = computed(() => [
             :class="collapsed ? 'justify-center' : 'justify-between'"
             class="data-[state=open]:bg-elevated"
             :ui="{ trailingIcon: 'text-muted' }"
+            :aria-label="me ?? 'Оператор'"
           >
             <span class="flex min-w-0 items-center gap-2.5">
               <UAvatar :text="(me ?? 'О')[0]!.toUpperCase()" size="sm" class="bg-primary text-white" :ui="{ fallback: 'text-white' }" />

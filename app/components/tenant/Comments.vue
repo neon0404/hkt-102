@@ -20,8 +20,8 @@ const SENTIMENT: Record<string, { label: string, icon: string, cls: string }> = 
 <template>
   <div>
     <Teleport defer to="#panel-actions">
-      <UBadge :color="tenant.settings.auto_reply_comments ? 'success' : 'neutral'" variant="subtle" :icon="tenant.settings.auto_reply_comments ? 'i-lucide-bot' : 'i-lucide-user-check'">
-        {{ tenant.settings.auto_reply_comments ? 'Автоответ' : 'Ответ после согласования' }}
+      <UBadge class="hidden sm:inline-flex" :color="tenant.settings.auto_reply_comments ? 'success' : 'neutral'" variant="subtle" :icon="tenant.settings.auto_reply_comments ? 'i-lucide-bot' : 'i-lucide-user-check'">
+        {{ tenant.settings.auto_reply_comments ? 'Автоответ' : 'Ответы на согласовании' }}
       </UBadge>
     </Teleport>
 
@@ -35,14 +35,14 @@ const SENTIMENT: Record<string, { label: string, icon: string, cls: string }> = 
               <p class="text-xs text-dimmed">{{ fmtDate(c.createdAt, tenant.timezone) }}</p>
             </div>
             <UTooltip v-if="c.sentiment && SENTIMENT[c.sentiment]" :text="SENTIMENT[c.sentiment]!.label">
-              <UIcon :name="SENTIMENT[c.sentiment]!.icon" class="size-4" :class="SENTIMENT[c.sentiment]!.cls" />
+              <UIcon :name="SENTIMENT[c.sentiment]!.icon" class="size-4 shrink-0" :class="SENTIMENT[c.sentiment]!.cls" role="img" :aria-label="SENTIMENT[c.sentiment]!.label" />
             </UTooltip>
-            <UBadge class="ms-auto" :color="STATUS[c.status]?.color" variant="subtle" size="sm">{{ STATUS[c.status]?.label }}</UBadge>
+            <UBadge class="ms-auto shrink-0" :color="STATUS[c.status]?.color ?? 'neutral'" variant="subtle" size="sm">{{ STATUS[c.status]?.label ?? 'Комментарий' }}</UBadge>
           </header>
-          <p class="text-sm text-default">{{ c.text }}</p>
+          <p class="whitespace-pre-line break-words text-sm text-default">{{ c.text }}</p>
           <div v-if="c.replyDraft" class="mt-3 flex gap-2.5 rounded-lg bg-elevated/60 p-3 text-sm">
             <UIcon name="i-lucide-corner-down-right" class="mt-0.5 size-4 shrink-0 text-primary" />
-            <p class="text-toned">{{ c.replyDraft }}</p>
+            <p class="min-w-0 whitespace-pre-line break-words text-toned">{{ c.replyDraft }}</p>
           </div>
         </article>
       </div>

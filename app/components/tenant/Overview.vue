@@ -3,7 +3,7 @@ const props = defineProps<{ tenantId: string }>()
 const { api } = useApi()
 const tenant = inject<Ref<any>>('tenant')!
 const { data, error, loading, reload } = useLoad(() => api(`/tenants/${props.tenantId}/analytics/summary`, { query: { days: 7 }, silent: true }), { poll: 20000 })
-const { data: posts } = useLoad<any[]>(() => api(`/tenants/${props.tenantId}/posts`, { query: { limit: 6 }, silent: true }), { poll: 15000 })
+const { data: posts, error: postsError, reload: reloadPosts } = useLoad<any[]>(() => api(`/tenants/${props.tenantId}/posts`, { query: { limit: 6 }, silent: true }), { poll: 15000 })
 
 const mins = (s: number) => s ? `${Math.max(1, Math.round(s / 60))} мин` : '—'
 const stats = computed(() => data.value
@@ -16,7 +16,6 @@ const stats = computed(() => data.value
       { label: 'Время согласования', value: mins(data.value.approvals.avgApproveSec), icon: 'i-lucide-timer' },
     ]
   : [])
-const ORIGIN: Record<string, string> = { schedule: 'автономно', plan: 'по плану', operator: 'оператор', user_request: 'по запросу' }
 </script>
 
 <template>
@@ -58,7 +57,7 @@ const ORIGIN: Record<string, string> = { schedule: 'автономно', plan: '
             <div>
               <p class="text-xs text-muted">Подписчики канала</p>
               <p class="text-xl font-semibold tabular-nums text-highlighted">
-                {{ data.subscribers ?? '—' }}
+                {{ data.subscribers?.toLocaleString('ru-RU') ?? '—' }}
                 <span v-if="data.subscribersDelta !== null" class="text-sm font-medium" :class="data.subscribersDelta >= 0 ? 'text-success' : 'text-error'">{{ data.subscribersDelta >= 0 ? '+' : '' }}{{ data.subscribersDelta }}</span>
               </p>
             </div>
@@ -81,19 +80,21 @@ const ORIGIN: Record<string, string> = { schedule: 'автономно', plan: '
 
     <section>
       <div class="mb-3 flex items-center justify-between">
-        <h2 class="text-sm font-semibold text-highlighted">Последние материалы</h2>
+        <h2 class="text-sm font-semibold text-highlighted">Последние посты</h2>
         <UButton size="xs" color="neutral" variant="ghost" trailing-icon="i-lucide-arrow-right" :to="sectionPath(tenantId, 'posts')">Все</UButton>
       </div>
       <UCard :ui="{ body: 'p-0 sm:p-0' }">
-        <p v-if="posts && !posts.length" class="p-6 text-center text-sm text-muted">Материалов пока нет</p>
+        <div v-if="!posts && postsError" class="flex items-center justify-between gap-3 p-4 text-sm text-error">{{ postsError }}<UButton size="xs" color="error" variant="outline" @click="reloadPosts()">Повторить</UButton></div>
+        <div v-else-if="!posts" class="space-y-2 p-4"><USkeleton v-for="i in 3" :key="i" class="h-10" /></div>
+        <p v-else-if="!posts.length" class="p-6 text-center text-sm text-muted">Постов нет</p>
         <ul v-else class="divide-y divide-default">
-          <li v-for="p in posts ?? []" :key="p.id">
+          <li v-for="p in posts" :key="p.id">
             <NuxtLink :to="`${sectionPath(tenantId, 'posts')}?post=${p.id}`" class="flex items-center gap-3 px-4 py-3 transition hover:bg-elevated/50">
               <img v-if="p.image_url" :src="p.image_url" alt="" class="size-10 shrink-0 rounded-md object-cover">
               <span v-else class="flex size-10 shrink-0 items-center justify-center rounded-md bg-elevated text-dimmed"><UIcon name="i-lucide-file-text" class="size-4" /></span>
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-medium text-highlighted">{{ p.title || p.topic }}</p>
-                <p class="text-xs text-muted">{{ fmtDate(p.created_at, tenant.timezone) }} · {{ ORIGIN[p.origin] ?? p.origin }}</p>
+                <p class="truncate text-xs text-muted">{{ fmtDate(p.created_at, tenant.timezone) }}<template v-if="POST_ORIGIN[p.origin]"> · {{ POST_ORIGIN[p.origin] }}</template></p>
               </div>
               <UBadge :color="statusOf(p).color" variant="subtle" size="sm">{{ statusOf(p).label }}</UBadge>
             </NuxtLink>

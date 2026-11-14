@@ -16,6 +16,8 @@ export const adminUsers = pgTable('admin_users', {
   id: id(),
   email: text('email').notNull().unique(),
   passwordHash: text('password_hash').notNull(),
+  name: text('name'),
+  tgUserId: bigint('tg_user_id', { mode: 'number' }),
   createdAt: createdAt(),
 })
 

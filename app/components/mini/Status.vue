@@ -4,7 +4,7 @@ type Color = 'primary' | 'success' | 'warning' | 'error' | 'neutral'
 const MAP: Record<string, { label: string, color: Color, icon: string }> = {
   generating: { label: 'Готовится', color: 'primary', icon: 'i-lucide-loader-circle' },
   revising: { label: 'На доработке', color: 'warning', icon: 'i-lucide-pencil' },
-  in_review: { label: 'Ждёт решения', color: 'warning', icon: 'i-lucide-hourglass' },
+  in_review: { label: 'На согласовании', color: 'warning', icon: 'i-lucide-hourglass' },
   approved: { label: 'Одобрен', color: 'primary', icon: 'i-lucide-calendar-check' },
   scheduled: { label: 'Запланирован', color: 'primary', icon: 'i-lucide-calendar-check' },
   publishing: { label: 'Публикуется', color: 'primary', icon: 'i-lucide-send' },

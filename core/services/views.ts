@@ -19,7 +19,7 @@ export async function listPosts(tenantId: string, opts: { status?: string, limit
     .leftJoin(schema.postVersions, eq(schema.postVersions.id, schema.posts.currentVersionId))
     .leftJoin(schema.publications, and(eq(schema.publications.postId, schema.posts.id), sql`${schema.publications.integrationId} IS NOT DISTINCT FROM ${schema.posts.integrationId}`))
     .where(and(...where)).orderBy(desc(schema.posts.createdAt))
-    .limit(Math.min(opts.limit ?? 50, 200)).offset(opts.offset ?? 0)
+    .limit(Math.max(1, Math.min(Math.floor(opts.limit ?? 50) || 50, 200))).offset(Math.max(0, Math.floor(opts.offset ?? 0) || 0))
   return rows.map(r => ({ ...r, image_url: r.image_media_id ? `/api/v1/tenants/${tenantId}/media/${r.image_media_id}` : null }))
 }
 

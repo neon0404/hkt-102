@@ -27,7 +27,10 @@ provide('reloadTenant', reload)
 <template>
   <AppPanel v-if="error || tenant?.id !== tenantId" id="tenant-loading" title="Компания">
     <UAlert v-if="error" color="error" variant="subtle" :title="error" icon="i-lucide-circle-alert">
-      <template #actions><UButton size="xs" color="error" variant="outline" @click="load">Повторить</UButton></template>
+      <template #actions>
+        <UButton size="xs" color="error" variant="outline" @click="load">Повторить</UButton>
+        <UButton size="xs" color="neutral" variant="ghost" to="/">К компаниям</UButton>
+      </template>
     </UAlert>
     <div v-else class="space-y-3"><USkeleton class="h-28" /><USkeleton class="h-64" /></div>
   </AppPanel>
