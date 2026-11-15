@@ -35,3 +35,12 @@ pnpm worker     # бот, планировщик, задачи
 ```
 
 Продакшен: `docker compose up -d --build`.
+
+## Контакты
+
+<img src=".github/kb-dev.png" alt="КБ" width="120">
+
+По вопросам дальнейшей работы оставлю контакты нашей компании:
+
+- https://kb-dev.ru/
+- [@KBLead](https://t.me/KBLead)
